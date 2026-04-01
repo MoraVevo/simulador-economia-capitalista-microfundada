@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--firms-per-sector",
         type=int,
-        default=20,
+        default=40,
         help="Number of firms to create in each sector at startup.",
     )
     parser.add_argument("--output", type=Path, help="Write the period history to JSON.")
@@ -96,6 +96,8 @@ def main() -> int:
         f"  total wages: {final.total_wages:,.2f}\n"
         f"  total sales revenue: {final.total_sales_revenue:,.2f}\n"
         f"  total investment spending: {final.period_investment_spending:,.2f}\n"
+        f"  recycled business costs: {final.business_cost_recycled:,.2f}\n"
+        f"  total liquid money: {final.total_liquid_money:,.2f}\n"
         f"  capital stock: {final.total_capital_stock:,.2f}\n"
         f"  inventory stock: {final.total_inventory_units:,.2f}\n"
         f"  total profit: {final.total_profit:,.2f}\n"

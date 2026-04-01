@@ -57,7 +57,7 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
     ),
     SectorSpec(
         key="manufactured",
-        name="Non-essential manufactured goods",
+        name="Manufacturing / industrial goods",
         base_price=9.0,
         base_wage=7.4,
         base_productivity=0.92,
@@ -93,10 +93,16 @@ class Household:
     savings: float
     reservation_wage: float
     saving_propensity: float
+    money_trust: float
+    consumption_impatience: float
     price_sensitivity: float
     need_scale: float
     sector_preference_weights: dict[str, float]
     age_periods: int
+    essential_shares: dict[str, float] = field(default_factory=dict)
+    discretionary_shares: dict[str, float] = field(default_factory=dict)
+    bank_id: int = 0
+    loan_balance: float = 0.0
     employed_by: Optional[int] = None
     guardian_id: Optional[int] = None
     partner_id: Optional[int] = None
@@ -104,6 +110,7 @@ class Household:
     father_id: Optional[int] = None
     children_count: int = 0
     desired_children: int = 0
+    child_desire_pressure: float = 0.0
     last_birth_period: int = -999
     dependent_children: int = 0
     employment_tenure: int = 0
@@ -112,6 +119,10 @@ class Household:
     last_available_cash: float = 0.0
     alive: bool = True
     deprivation_streak: int = 0
+    severe_hunger_streak: int = 0
+    housing_deprivation_streak: int = 0
+    clothing_deprivation_streak: int = 0
+    health_fragility: float = 0.0
     last_consumption: dict[str, float] = field(default_factory=dict)
 
 
@@ -119,7 +130,60 @@ class Household:
 class Entrepreneur:
     id: int
     wealth: float
+    bank_id: int = 0
+    vault_cash: float = 0.0
+    consumption_propensity: float = 0.0
+    loan_balance: float = 0.0
     active: bool = True
+
+
+@dataclass
+class CentralBank:
+    money_supply: float
+    target_money_supply: float
+    policy_rate: float = 0.0
+    issuance_this_period: float = 0.0
+    cumulative_issuance: float = 0.0
+
+
+@dataclass
+class CommercialBank:
+    id: int
+    name: str
+    reserve_ratio: float = 0.20
+    deposits: float = 0.0
+    reserves: float = 0.0
+    loans_households: float = 0.0
+    loans_firms: float = 0.0
+    bond_holdings: float = 0.0
+    central_bank_borrowing: float = 0.0
+    deposit_rate: float = 0.0
+    loan_rate: float = 0.0
+    bond_yield: float = 0.0
+    interest_income: float = 0.0
+    interest_expense: float = 0.0
+    profits: float = 0.0
+    active: bool = True
+
+
+@dataclass
+class Government:
+    treasury_cash: float = 0.0
+    bank_id: int = 0
+    debt_outstanding: float = 0.0
+    tax_revenue_this_period: float = 0.0
+    corporate_tax_revenue: float = 0.0
+    dividend_tax_revenue: float = 0.0
+    wealth_tax_revenue: float = 0.0
+    transfers_this_period: float = 0.0
+    unemployment_support_this_period: float = 0.0
+    child_allowance_this_period: float = 0.0
+    basic_support_this_period: float = 0.0
+    procurement_spending_this_period: float = 0.0
+    bond_issuance_this_period: float = 0.0
+    deficit_this_period: float = 0.0
+    surplus_this_period: float = 0.0
+    cumulative_deficit: float = 0.0
 
 
 @dataclass
@@ -136,6 +200,7 @@ class Firm:
     technology: float = 1.0
     demand_elasticity: float = 1.0
     input_cost_per_unit: float = 0.0
+    input_cost_exempt: bool = False
     transport_cost_per_unit: float = 0.0
     fixed_overhead: float = 0.0
     markup_tolerance: float = 1.0
@@ -145,7 +210,9 @@ class Firm:
     price_aggressiveness: float = 1.0
     cash_conservatism: float = 1.0
     market_share_ambition: float = 1.0
+    forecast_caution: float = 1.0
     active: bool = True
+    bank_id: int = 0
     age: int = 0
     desired_workers: int = 0
     workers: list[int] = field(default_factory=list)
@@ -167,8 +234,10 @@ class Firm:
     last_market_share: float = 0.0
     last_expected_sales: float = 0.0
     market_fragility_belief: float = 0.0
+    forecast_error_belief: float = 0.15
     last_technology_investment: float = 0.0
     last_technology_gain: float = 0.0
+    loan_balance: float = 0.0
     bankruptcy_streak: int = 0
     loss_streak: int = 0
 
@@ -202,16 +271,22 @@ class FirmPeriodSnapshot:
     price_aggressiveness: float
     cash_conservatism: float
     market_share_ambition: float
+    demand_elasticity: float
+    forecast_caution: float
+    learning_maturity: float
     technology: float
     technology_investment: float
     technology_gain: float
     sales: float
+    expected_sales: float
     revenue: float
     production: float
     profit: float
     total_cost: float
     loss_streak: int
     market_share: float
+    market_fragility_belief: float
+    forecast_error_belief: float
     target_inventory: float
     age: int
 
@@ -222,7 +297,8 @@ class SimulationConfig:
     households: int = 10000
     seed: int = 7
     periods_per_year: int = 12
-    firms_per_sector: int = 20
+    firms_per_sector: int = 40
+    commercial_banks: int = 3
     target_unemployment: float = 0.08
     capital_scale: float = 350.0
     depreciation_rate: float = 0.04
@@ -230,9 +306,9 @@ class SimulationConfig:
     wage_ceiling_multiplier: float = 1.8
     price_floor_multiplier: float = 0.55
     price_ceiling_multiplier: float = 6.0
-    payout_ratio: float = 0.20
-    investment_rate: float = 0.15
-    cash_reserve_periods: float = 1.0
+    payout_ratio: float = 0.32
+    investment_rate: float = 0.30
+    cash_reserve_periods: float = 0.75
     bankruptcy_cash_threshold: float = -50.0
     bankruptcy_streak_limit: int = 5
     bankruptcy_grace_period: int = 2
@@ -266,9 +342,24 @@ class SimulationConfig:
     senior_age_years: float = 70.0
     retirement_age_years: float = 80.0
     max_age_years: float = 85.0
+    startup_grace_periods: int = 2
+    firm_learning_warmup_periods: int = 18
+    birth_interval_periods: int = 9
     annual_birth_rate: float = 0.15
+    annual_birth_rate_capable_single: float = 0.10
+    annual_birth_rate_capable_partnered: float = 0.50
+    annual_birth_rate_noncapable: float = 0.03
+    period_days: int = 31
+    food_meals_per_day_sufficient: float = 3.0
+    food_meals_per_day_subsistence: float = 2.0
+    food_meals_per_day_severe: float = 1.0
     annual_base_death_rate: float = 0.005
     annual_senior_death_rate: float = 0.08
+    period_base_death_probability: float = 0.0004
+    period_senior_death_probability: float = 0.0065
+    period_food_subsistence_death_risk: float = 0.002
+    period_severe_hunger_death_risk: float = 0.014
+    period_health_fragility_death_risk: float = 0.0035
     starvation_death_periods: int = 3
     essential_sustenance_fraction: float = 0.70
     child_consumption_multiplier: float = 0.55
@@ -287,6 +378,55 @@ class SimulationConfig:
     initial_owner_wealth_min: float = 120.0
     initial_owner_wealth_max: float = 220.0
     replacement_enabled: bool = True
+    central_bank_enabled: bool = True
+    central_bank_rule: str = "goods_growth"
+    central_bank_target_velocity: float = 0.20
+    central_bank_target_annual_inflation: float = 0.04
+    central_bank_max_issue_share: float = 0.05
+    central_bank_goods_growth_pass_through: float = 1.0
+    central_bank_policy_rate_base: float = 0.02
+    central_bank_policy_rate_floor: float = 0.00
+    central_bank_policy_rate_ceiling: float = 0.12
+    central_bank_productivity_dividend_share: float = 1.0
+    reserve_ratio: float = 0.20
+    bank_initial_reserve_multiplier: float = 1.00
+    bank_bond_allocation_share: float = 0.50
+    bank_min_capital_ratio: float = 0.08
+    bank_bond_risk_weight: float = 0.20
+    bank_loan_rate: float = 0.03
+    bank_bond_yield: float = 0.02
+    bank_deposit_rate_share: float = 0.55
+    bank_household_max_debt_to_income: float = 8.0
+    bank_household_max_interest_share: float = 0.35
+    bank_firm_min_interest_coverage: float = 1.15
+    bank_firm_max_debt_to_revenue: float = 6.0
+    central_bank_discount_window_spread: float = 0.05
+    entrepreneur_consumption_share: float = 0.20
+    entrepreneur_vault_share: float = 0.02
+    reservation_wage_adjustment_speed: float = 0.85
+    reservation_wage_floor_share: float = 1.00
+    living_wage_bargaining_weight: float = 0.45
+    essential_wage_bargaining_bonus: float = 0.20
+    government_enabled: bool = True
+    government_corporate_tax_rate_low: float = 0.10
+    government_corporate_tax_rate_mid: float = 0.18
+    government_corporate_tax_rate_high: float = 0.28
+    government_corporate_tax_margin_mid: float = 0.08
+    government_corporate_tax_margin_high: float = 0.18
+    government_dividend_tax_rate_low: float = 0.04
+    government_dividend_tax_rate_mid: float = 0.10
+    government_dividend_tax_rate_high: float = 0.18
+    government_dividend_bracket_low: float = 2.0
+    government_dividend_bracket_high: float = 8.0
+    government_wealth_tax_rate: float = 0.002
+    government_wealth_tax_threshold_multiple: float = 24.0
+    government_unemployment_benefit_share: float = 0.30
+    government_child_allowance_share: float = 0.10
+    government_basic_support_gap_share: float = 0.35
+    government_procurement_gap_share: float = 0.30
+    government_procurement_price_sensitivity: float = 0.85
+    government_spending_scale: float = 1.00
+    government_spending_efficiency: float = 0.95
 
 
 @dataclass
@@ -298,6 +438,14 @@ class PeriodSnapshot:
     women: int
     men: int
     fertile_women: int
+    fertile_capable_women: int
+    fertile_capable_women_low_desire_no_birth: int
+    fertile_capable_women_with_births: int
+    fertile_families: int
+    fertile_families_with_births: int
+    fertile_capable_families: int
+    fertile_capable_families_low_desire_no_birth: int
+    fertile_capable_families_with_births: int
     children: int
     adults: int
     seniors: int
@@ -321,9 +469,21 @@ class PeriodSnapshot:
     essential_demand_units: float
     essential_sales_units: float
     essential_fulfillment_rate: float
+    average_food_meals_per_person: float
+    food_sufficient_share: float
+    food_subsistence_share: float
+    food_acute_hunger_share: float
+    food_severe_hunger_share: float
+    average_health_fragility: float
     total_sales_revenue: float
     total_production_units: float
     period_investment_spending: float
+    business_cost_recycled: float
+    business_cost_to_firms: float
+    business_cost_to_households: float
+    business_cost_to_owners: float
+    inheritance_transfers: float
+    bankruptcy_cash_recoveries: float
     gdp_nominal: float
     gdp_per_capita: float
     total_capital_stock: float
@@ -335,11 +495,73 @@ class PeriodSnapshot:
     deaths: int
     average_age: float
     average_worker_savings: float
+    worker_cash_available: float
+    worker_cash_saved: float
+    worker_voluntary_saved: float
+    worker_involuntary_retained: float
+    worker_bank_deposits: float
+    worker_credit_outstanding: float
     gini_household_savings: float
     gini_owner_wealth: float
+    capitalist_bank_deposits: float
+    capitalist_vault_cash: float
+    capitalist_firm_cash: float
+    capitalist_credit_outstanding: float
+    capitalist_productive_capital: float
+    capitalist_inventory_value: float
     capitalist_controlled_assets: float
     capitalist_asset_share: float
+    capitalist_liquid_share: float
+    worker_liquid_share: float
+    goods_monetary_mass: float
     price_index: float
+    government_treasury_cash: float
+    government_debt_outstanding: float
+    government_tax_revenue: float
+    government_corporate_tax_revenue: float
+    government_dividend_tax_revenue: float
+    government_wealth_tax_revenue: float
+    government_transfers: float
+    government_unemployment_support: float
+    government_child_allowance: float
+    government_basic_support: float
+    government_procurement_spending: float
+    government_bond_issuance: float
+    government_deficit: float
+    government_surplus: float
+    labor_share_gdp: float
+    profit_share_gdp: float
+    investment_share_gdp: float
+    capitalist_consumption_share_gdp: float
+    government_spending_share_gdp: float
+    dividend_share_gdp: float
+    retained_profit_share_gdp: float
+    central_bank_money_supply: float
+    central_bank_target_money_supply: float
+    central_bank_policy_rate: float
+    central_bank_issuance: float
+    cumulative_central_bank_issuance: float
+    household_credit_creation: float
+    firm_credit_creation: float
+    commercial_bank_credit_creation: float
+    average_bank_deposit_rate: float
+    average_bank_loan_rate: float
+    total_bank_deposits: float
+    total_bank_reserves: float
+    total_bank_loans_households: float
+    total_bank_loans_firms: float
+    total_bank_bond_holdings: float
+    total_bank_assets: float
+    total_bank_liabilities: float
+    bank_equity: float
+    bank_capital_ratio: float
+    bank_asset_liability_ratio: float
+    bank_reserve_coverage_ratio: float
+    bank_liquidity_ratio: float
+    bank_loan_to_deposit_ratio: float
+    bank_insolvent_share: float
+    money_velocity: float
+    total_liquid_money: float
     total_household_savings: float
 
 
@@ -351,3 +573,6 @@ class SimulationResult:
     households: list[Household]
     entrepreneurs: list[Entrepreneur]
     firms: list[Firm]
+    central_bank: CentralBank
+    banks: list[CommercialBank]
+    government: Government

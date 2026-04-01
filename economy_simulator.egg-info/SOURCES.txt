@@ -1,0 +1,15 @@
+pyproject.toml
+economy_simulator/__init__.py
+economy_simulator/__main__.py
+economy_simulator/cli.py
+economy_simulator/domain.py
+economy_simulator/engine.py
+economy_simulator/metrics.py
+economy_simulator/reporting.py
+economy_simulator.egg-info/PKG-INFO
+economy_simulator.egg-info/SOURCES.txt
+economy_simulator.egg-info/dependency_links.txt
+economy_simulator.egg-info/entry_points.txt
+economy_simulator.egg-info/requires.txt
+economy_simulator.egg-info/top_level.txt
+tests/test_money_flow.py
