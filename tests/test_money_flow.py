@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from economy_simulator.domain import ESSENTIAL_SECTOR_KEYS, SECTOR_BY_KEY, SECTOR_SPECS, SimulationConfig
+from economy_simulator.domain import ESSENTIAL_SECTOR_KEYS, Entrepreneur, SECTOR_BY_KEY, SECTOR_SPECS, SimulationConfig
 from economy_simulator.engine import EconomySimulation
 from economy_simulator.reporting import history_frame
 
@@ -42,6 +42,36 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertGreater(share_unmet, share_covered)
         self.assertGreater(share_covered, share_overcovered)
+
+    def test_leisure_utility_weight_rises_once_basic_needs_are_covered(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=39)
+        )
+
+        stressed_leisure = sim._discretionary_sector_utility_weight(
+            "leisure",
+            1.0,
+            essential_coverage=0.75,
+            family_remaining_cash=0.0,
+            family_basic_basket_cost=100.0,
+        )
+        comfortable_leisure = sim._discretionary_sector_utility_weight(
+            "leisure",
+            1.0,
+            essential_coverage=1.25,
+            family_remaining_cash=140.0,
+            family_basic_basket_cost=100.0,
+        )
+        comfortable_manufactured = sim._discretionary_sector_utility_weight(
+            "manufactured",
+            1.0,
+            essential_coverage=1.25,
+            family_remaining_cash=140.0,
+            family_basic_basket_cost=100.0,
+        )
+
+        self.assertGreater(comfortable_leisure, stressed_leisure)
+        self.assertGreater(comfortable_leisure, comfortable_manufactured)
 
     def test_family_savings_rate_tracks_buffer_trust_and_present_bias(self) -> None:
         sim = EconomySimulation(
@@ -137,6 +167,20 @@ class MoneyFlowTests(unittest.TestCase):
         rationed_bounded = frame["worker_involuntary_retention_rate"].dropna().between(0.0, 1.0)
         self.assertTrue(rationed_bounded.all())
 
+    def test_history_frame_exposes_average_perceived_utility(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=4, households=150, firms_per_sector=3, seed=43)
+        )
+
+        for _ in range(4):
+            sim.step()
+
+        frame = history_frame(sim.history)
+
+        self.assertIn("average_perceived_utility", frame.columns)
+        self.assertIn("perceived_utility_growth", frame.columns)
+        self.assertTrue((frame["average_perceived_utility"] >= 0.0).all())
+
     def test_food_hunger_dominates_nonfood_fragility_in_death_probability(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=91)
@@ -184,9 +228,43 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertIn("food_acute_hunger_share", frame.columns)
         self.assertIn("food_severe_hunger_share", frame.columns)
         self.assertIn("average_health_fragility", frame.columns)
+        self.assertIn("average_perceived_utility", frame.columns)
         self.assertGreaterEqual(snapshot.average_food_meals_per_person, 0.0)
         self.assertTrue(0.0 <= snapshot.food_sufficient_share <= 1.0)
         self.assertTrue(0.0 <= snapshot.food_severe_hunger_share <= 1.0)
+        self.assertGreaterEqual(snapshot.average_perceived_utility, 0.0)
+
+    def test_entry_owner_selection_uses_heterogeneous_market_evaluation(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=97)
+        )
+        conservative_rich = Entrepreneur(
+            id=0,
+            wealth=420.0,
+            entry_appetite=0.75,
+            market_research_skill=0.70,
+            entry_optimism=-0.10,
+        )
+        prepared_smaller = Entrepreneur(
+            id=1,
+            wealth=220.0,
+            entry_appetite=1.35,
+            market_research_skill=1.40,
+            entry_optimism=0.10,
+        )
+        sim.entrepreneurs = [conservative_rich, prepared_smaller]
+
+        with patch.object(sim, "_sector_entry_opportunity_signal", return_value=1.0):
+            with patch.object(sim.rng, "gauss", side_effect=[-0.25, 0.05]):
+                selected = sim._select_entry_owner(
+                    "leisure",
+                    demand_signal=120.0,
+                    entry_gap=35.0,
+                    base_restart_cost=80.0,
+                )
+
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected.id, prepared_smaller.id)
 
     def test_survival_essential_metrics_ignore_extra_essential_purchases(self) -> None:
         sim = EconomySimulation(
@@ -416,6 +494,52 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertIn(employed_adult.id, participant_ids)
         self.assertIn(stressed_spouse.id, participant_ids)
 
+    def test_refresh_family_links_matches_each_female_once_in_greedy_order(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=80, firms_per_sector=2, seed=81)
+        )
+        males = [
+            household
+            for household in sim.households
+            if household.sex == "M"
+            and sim.config.entry_age_years <= sim._household_age_years(household) < sim.config.senior_age_years
+        ][:2]
+        females = [
+            household
+            for household in sim.households
+            if household.sex == "F"
+            and sim.config.entry_age_years <= sim._household_age_years(household) < sim.config.senior_age_years
+        ][:2]
+        self.assertEqual(len(males), 2)
+        self.assertEqual(len(females), 2)
+        male_1, male_2 = males
+        female_1, female_2 = females
+
+        selected_ids = {male_1.id, male_2.id, female_1.id, female_2.id}
+        for household in sim.households:
+            household.alive = household.id in selected_ids
+            household.partner_id = None
+            if household.alive:
+                household.last_birth_period = -999
+
+        periods_per_year = sim.config.periods_per_year
+        male_1.age_periods = 30 * periods_per_year
+        male_2.age_periods = 30 * periods_per_year
+        female_1.age_periods = 30 * periods_per_year
+        female_2.age_periods = 31 * periods_per_year
+
+        for household in (male_1, male_2, female_1, female_2):
+            household.savings = 100.0
+            household.desired_children = 2
+
+        sim._refresh_period_household_caches()
+        sim._refresh_family_links()
+
+        self.assertEqual(male_1.partner_id, female_1.id)
+        self.assertEqual(female_1.partner_id, male_1.id)
+        self.assertEqual(male_2.partner_id, female_2.id)
+        self.assertEqual(female_2.partner_id, male_2.id)
+
     def test_match_labor_is_not_limited_by_firm_employment_share_cap(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=120, firms_per_sector=1, seed=81, max_firm_employment_share=0.02)
@@ -457,6 +581,9 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertIn("total_bank_assets", frame.columns)
         self.assertIn("total_bank_liabilities", frame.columns)
         self.assertIn("bank_equity", frame.columns)
+        self.assertIn("bank_recapitalization", frame.columns)
+        self.assertIn("bank_resolution_events", frame.columns)
+        self.assertIn("bank_undercapitalized_share", frame.columns)
         self.assertIn("commercial_bank_credit_creation", frame.columns)
         self.assertIn("worker_bank_deposits", frame.columns)
         self.assertIn("capitalist_productive_capital", frame.columns)
@@ -501,6 +628,99 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertAlmostEqual(sim._bank_capital_lending_capacity(bank), 2000.0, places=6)
         self.assertAlmostEqual(sim._bank_effective_lending_capacity(bank), 2000.0, places=6)
 
+    def test_bank_prudential_lending_multiplier_turns_restrictive_before_insolvency(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=2, seed=86, bank_min_capital_ratio=0.08)
+        )
+        bank = sim.banks[0]
+        bank.deposits = 1000.0
+        bank.central_bank_borrowing = 0.0
+        bank.bond_holdings = 0.0
+        bank.loans_households = 1000.0
+        bank.loans_firms = 0.0
+
+        bank.reserves = 300.0
+        healthy_multiplier = sim._bank_prudential_lending_multiplier(bank)
+
+        bank.reserves = 110.0
+        weak_multiplier = sim._bank_prudential_lending_multiplier(bank)
+
+        self.assertGreater(healthy_multiplier, weak_multiplier)
+        self.assertGreaterEqual(weak_multiplier, 0.0)
+        self.assertLess(weak_multiplier, 0.5)
+
+    def test_undercapitalized_bank_restores_private_capital_before_insolvency(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=87, bank_min_capital_ratio=0.08)
+        )
+        bank = sim.banks[0]
+
+        for household in sim.households:
+            household.savings = 0.0
+            household.wage_income = 0.0
+            household.loan_balance = 0.0
+            household.bank_id = bank.id
+        for owner in sim.entrepreneurs:
+            owner.wealth = 0.0
+            owner.vault_cash = 0.0
+            owner.bank_id = bank.id
+        for firm in sim.firms:
+            firm.cash = 0.0
+            firm.loan_balance = 0.0
+            firm.bank_id = bank.id
+
+        sim.households[0].savings = 1000.0
+        sim.households[1].loan_balance = 1000.0
+        sim.entrepreneurs[0].vault_cash = 500.0
+        bank.reserves = 100.0
+        bank.bond_holdings = 0.0
+        bank.central_bank_borrowing = 0.0
+
+        sim._refresh_bank_balance_sheets()
+        initial_ratio = sim._bank_capital_ratio(bank)
+        sim._stabilize_bank_capital_positions()
+        restored_ratio = sim._bank_capital_ratio(bank)
+
+        self.assertLess(initial_ratio, sim._bank_warning_capital_ratio())
+        self.assertGreater(sim._period_bank_recapitalization, 0.0)
+        self.assertGreaterEqual(restored_ratio, sim._bank_warning_capital_ratio() - 1e-9)
+        self.assertGreater(sim._period_bank_undercapitalized_share_signal, 0.0)
+
+    def test_negative_bank_equity_triggers_recapitalization(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=120,
+                firms_per_sector=2,
+                seed=88,
+                central_bank_enabled=False,
+                bank_min_capital_ratio=0.10,
+            )
+        )
+        bank = sim.banks[0]
+        household = sim.households[0]
+        owner = sim.entrepreneurs[0]
+        household.bank_id = bank.id
+        household.savings = 100.0
+        household.loan_balance = 0.0
+        owner.bank_id = bank.id
+        owner.wealth = 0.0
+        owner.vault_cash = 1500.0
+
+        sim._refresh_bank_balance_sheets()
+        bank.reserves = 0.0
+        bank.bond_holdings = 0.0
+        bank.loans_households = 0.0
+        bank.loans_firms = 0.0
+        bank.central_bank_borrowing = 150.0
+
+        sim._resolve_bank_insolvency()
+
+        self.assertGreater(sim._period_bank_recapitalization, 0.0)
+        self.assertGreaterEqual(sim._period_bank_resolution_events, 1)
+        self.assertGreaterEqual(sim._bank_equity(bank), 0.0)
+        self.assertGreater(sim._period_bank_insolvent_share_signal, 0.0)
+
     def test_uncreditworthy_household_request_is_denied(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=87)
@@ -528,6 +748,7 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertIn("worker_augmented_asset_share", frame.columns)
         self.assertIn("capitalist_augmented_asset_share", frame.columns)
         self.assertIn("government_tax_burden_gdp", frame.columns)
+        self.assertIn("worker_consumption_share_gdp", frame.columns)
         self.assertIn("commercial_bank_credit_creation_share_money", frame.columns)
         shares = (
             frame[["worker_augmented_asset_share", "capitalist_augmented_asset_share"]]
@@ -535,6 +756,7 @@ class MoneyFlowTests(unittest.TestCase):
             .sum(axis=1)
         )
         self.assertTrue(((shares - 1.0).abs() <= 1e-6).all())
+        self.assertTrue(frame["worker_consumption_share_gdp"].dropna().ge(0.0).all())
         creation_matches = (
             frame["commercial_bank_credit_creation"]
             - frame["household_credit_creation"]
@@ -603,7 +825,13 @@ class MoneyFlowTests(unittest.TestCase):
             sim.step()
 
         final_liquid_money = sim.history[-1].total_liquid_money
-        self.assertAlmostEqual(final_liquid_money, initial_liquid_money, places=6)
+        cumulative_bond_issuance = sum(snapshot.government_bond_issuance for snapshot in sim.history)
+        cumulative_credit_creation = sum(snapshot.commercial_bank_credit_creation for snapshot in sim.history)
+        self.assertAlmostEqual(
+            final_liquid_money,
+            initial_liquid_money + cumulative_bond_issuance + cumulative_credit_creation,
+            places=6,
+        )
 
     def test_demography_and_reentry_still_preserve_liquid_money(self) -> None:
         cfg = SimulationConfig(
@@ -624,7 +852,13 @@ class MoneyFlowTests(unittest.TestCase):
             sim.step()
 
         final_liquid_money = sim.history[-1].total_liquid_money
-        self.assertAlmostEqual(final_liquid_money, initial_liquid_money, places=6)
+        cumulative_bond_issuance = sum(snapshot.government_bond_issuance for snapshot in sim.history)
+        cumulative_credit_creation = sum(snapshot.commercial_bank_credit_creation for snapshot in sim.history)
+        self.assertAlmostEqual(
+            final_liquid_money,
+            initial_liquid_money + cumulative_bond_issuance + cumulative_credit_creation,
+            places=6,
+        )
 
     def test_central_bank_issues_money_when_fisher_target_exceeds_supply(self) -> None:
         sim = EconomySimulation(

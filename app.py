@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import concurrent.futures
+import json
 from dataclasses import replace
+from io import StringIO
+import subprocess
+import sys
 
 import pandas as pd
 import plotly.express as px
@@ -14,7 +19,7 @@ from economy_simulator.reporting import firm_history_frame, firm_period_summary,
 INITIAL_HOUSEHOLDS = 10000
 MONTH_PRESETS = [12, 24, 60, 120, 240]
 PERIODS_PER_YEAR = 12
-RUN_MODEL_CACHE_VERSION = 25
+RUN_MODEL_CACHE_VERSION = 26
 CENTRAL_BANK_RULE_OPTIONS = {
     "Emision por crecimiento de bienes": "goods_growth",
     "Fisher": "fisher",
@@ -65,6 +70,7 @@ COLUMN_LABELS = {
     "worker_net_financial_position": "Posicion financiera neta trabajadora",
     "worker_savings_rate": "Tasa agregada de ahorro voluntario",
     "worker_involuntary_retention_rate": "Tasa de retencion por racionamiento",
+    "worker_consumption_share_gdp": "Consumo trabajador / PIB",
     "employment_rate": "Empleo",
     "unemployment_rate": "Desempleo",
     "average_workers": "Trabajadores promedio",
@@ -114,6 +120,8 @@ COLUMN_LABELS = {
     "food_acute_hunger_share": "Poblacion con hambre aguda",
     "food_severe_hunger_share": "Poblacion con hambre severa",
     "average_health_fragility": "Fragilidad de salud promedio",
+    "average_perceived_utility": "Utilidad promedio percibida",
+    "perceived_utility_growth": "Cambio de utilidad percibida",
     "labor_cost_per_product": "Costo laboral por unidad producida",
     "essential_basket_equivalents_produced": "Canastas esenciales completas producidas",
     "basic_goods_labor_cost_per_unit": "Costo laboral unitario basico",
@@ -190,6 +198,9 @@ COLUMN_LABELS = {
     "total_bank_assets": "Activos bancarios totales",
     "total_bank_liabilities": "Pasivos bancarios totales",
     "bank_equity": "Patrimonio neto bancario",
+    "bank_recapitalization": "Restauracion de capital bancario",
+    "bank_resolution_events": "Resoluciones bancarias",
+    "bank_undercapitalized_share": "Participacion de bancos subcapitalizados",
     "bank_capital_ratio": "Capital bancario / activos",
     "bank_asset_liability_ratio": "Activos / pasivos bancarios",
     "bank_reserve_coverage_ratio": "Cobertura de reservas bancarias",
@@ -207,6 +218,7 @@ COLUMN_LABELS = {
     "inflation_yoy": "Inflacion anual",
     "population_growth": "Crecimiento poblacional",
     "population_growth_yoy": "Crecimiento anual poblacional",
+    "perceived_utility_growth_yoy": "Cambio anual de utilidad percibida",
     "birth_death_balance": "Balance demografico",
     "end_population": "Poblacion final",
     "end_women": "Mujeres finales",
@@ -402,6 +414,81 @@ def default_policy_values() -> dict[str, float | str]:
         "government_procurement_price_sensitivity": DEFAULT_POLICY_CONFIG.government_procurement_price_sensitivity,
         "government_spending_scale": DEFAULT_POLICY_CONFIG.government_spending_scale,
         "government_spending_efficiency": DEFAULT_POLICY_CONFIG.government_spending_efficiency,
+    }
+
+
+def guatemala_policy_values() -> dict[str, float | str]:
+    values = default_policy_values()
+    values.update(
+        {
+            "central_bank_goods_growth_pass_through": 0.75,
+            "central_bank_target_velocity": 0.45,
+            "central_bank_target_annual_inflation": 0.045,
+            "central_bank_policy_rate_base": 0.07,
+            "central_bank_policy_rate_floor": 0.03,
+            "central_bank_policy_rate_ceiling": 0.18,
+            "central_bank_productivity_dividend_share": 0.25,
+            "reserve_ratio": 0.05,
+            "bank_bond_allocation_share": 0.20,
+            "bank_deposit_rate_share": 0.15,
+            "government_corporate_tax_rate_low": 0.05,
+            "government_corporate_tax_rate_mid": 0.10,
+            "government_corporate_tax_rate_high": 0.15,
+            "government_dividend_tax_rate_low": 0.02,
+            "government_dividend_tax_rate_mid": 0.05,
+            "government_dividend_tax_rate_high": 0.08,
+            "government_wealth_tax_rate": 0.000,
+            "government_wealth_tax_threshold_multiple": 40.0,
+            "government_unemployment_benefit_share": 0.05,
+            "government_child_allowance_share": 0.05,
+            "government_basic_support_gap_share": 0.08,
+            "government_procurement_gap_share": 0.08,
+            "government_procurement_price_sensitivity": 1.60,
+            "government_spending_scale": 0.35,
+            "government_spending_efficiency": 0.55,
+        }
+    )
+    return values
+
+
+def norway_policy_values() -> dict[str, float | str]:
+    values = default_policy_values()
+    values.update(
+        {
+            "central_bank_goods_growth_pass_through": 0.95,
+            "central_bank_target_velocity": 0.30,
+            "central_bank_target_annual_inflation": 0.020,
+            "central_bank_policy_rate_base": 0.03,
+            "central_bank_policy_rate_floor": 0.01,
+            "central_bank_policy_rate_ceiling": 0.10,
+            "central_bank_productivity_dividend_share": 0.60,
+            "reserve_ratio": 0.14,
+            "bank_bond_allocation_share": 0.45,
+            "bank_deposit_rate_share": 0.55,
+            "government_corporate_tax_rate_low": 0.20,
+            "government_corporate_tax_rate_mid": 0.28,
+            "government_corporate_tax_rate_high": 0.35,
+            "government_dividend_tax_rate_low": 0.15,
+            "government_dividend_tax_rate_mid": 0.22,
+            "government_dividend_tax_rate_high": 0.30,
+            "government_wealth_tax_rate": 0.012,
+            "government_wealth_tax_threshold_multiple": 12.0,
+            "government_unemployment_benefit_share": 0.60,
+            "government_child_allowance_share": 0.30,
+            "government_basic_support_gap_share": 0.65,
+            "government_procurement_gap_share": 0.75,
+            "government_procurement_price_sensitivity": 0.70,
+            "government_spending_scale": 1.35,
+            "government_spending_efficiency": 0.90,
+        }
+    )
+    return values
+
+
+def scenario_policy_presets() -> dict[str, dict[str, float | str]]:
+    return {
+        "Guatemala (mas liberal)": guatemala_policy_values(),
+        "Noruega (economia del bienestar)": norway_policy_values(),
     }
 
 
@@ -671,6 +758,51 @@ def run_model(
     return result, history_df
 
 
+def _run_history_subprocess(payload: dict[str, object]) -> pd.DataFrame:
+    completed = subprocess.run(
+        [sys.executable, "-m", "economy_simulator.scenario_runner"],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return pd.read_json(StringIO(completed.stdout), orient="split")
+
+
+@st.cache_data(show_spinner=False)
+def run_parallel_preset_histories(
+    months: int,
+    seed: int,
+    firms_per_sector: int,
+    cache_version: int = RUN_MODEL_CACHE_VERSION,
+) -> dict[str, pd.DataFrame]:
+    del cache_version
+    presets = scenario_policy_presets()
+    payloads = {
+        scenario_name: {
+            "months": months,
+            "seed": seed,
+            "firms_per_sector": firms_per_sector,
+            "households": INITIAL_HOUSEHOLDS,
+            "periods_per_year": PERIODS_PER_YEAR,
+            "base_policy_values": policy_values,
+            "policy_change_period": None,
+            "shock_policy_values": None,
+        }
+        for scenario_name, policy_values in presets.items()
+    }
+    results: dict[str, pd.DataFrame] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+        future_map = {
+            executor.submit(_run_history_subprocess, payload): scenario_name
+            for scenario_name, payload in payloads.items()
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            scenario_name = future_map[future]
+            results[scenario_name] = future.result()
+    return {scenario_name: results[scenario_name] for scenario_name in presets}
+
+
 @st.cache_data(show_spinner=False)
 def dataframe_to_csv_bytes(frame: pd.DataFrame) -> bytes:
     return frame.to_csv(index=False).encode("utf-8")
@@ -740,6 +872,145 @@ def make_line_chart(frame: pd.DataFrame, x: str, y_cols: list[str], title: str, 
     fig.update_xaxes(showgrid=False)
     fig.update_yaxes(gridcolor="rgba(15,23,42,0.08)")
     return fig
+
+
+def make_scenario_comparison_chart(
+    scenario_histories: dict[str, pd.DataFrame],
+    metric: str,
+    *,
+    title: str,
+    y_title: str,
+) -> go.Figure:
+    comparison_frames = []
+    for scenario_name, frame in scenario_histories.items():
+        if metric not in frame.columns:
+            continue
+        scenario_frame = frame[["period", metric]].copy()
+        scenario_frame["scenario"] = scenario_name
+        comparison_frames.append(scenario_frame)
+
+    if comparison_frames:
+        combined = pd.concat(comparison_frames, ignore_index=True)
+    else:
+        combined = pd.DataFrame(columns=["period", metric, "scenario"])
+
+    fig = px.line(
+        combined,
+        x="period",
+        y=metric,
+        color="scenario",
+        color_discrete_map={
+            "Guatemala (mas liberal)": "#b45309",
+            "Noruega (economia del bienestar)": "#1d4ed8",
+        },
+    )
+    fig.update_layout(
+        title=title,
+        paper_bgcolor="rgba(255,255,255,0)",
+        plot_bgcolor="rgba(255,255,255,0)",
+        font=dict(color="#0f172a"),
+        legend_title_text="",
+        margin=dict(l=10, r=10, t=50, b=10),
+        height=340,
+        yaxis_title=y_title,
+        hovermode="x unified",
+    )
+    fig.update_xaxes(showgrid=False)
+    fig.update_yaxes(gridcolor="rgba(15,23,42,0.08)")
+    return fig
+
+
+def build_scenario_summary_table(scenario_histories: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    records = []
+    for scenario_name, frame in scenario_histories.items():
+        if frame.empty:
+            continue
+        latest = frame.iloc[-1]
+        records.append(
+            {
+                "Escenario": scenario_name,
+                "PIB per capita": float(latest.get("gdp_per_capita", 0.0)),
+                "Desempleo": float(latest.get("unemployment_rate", 0.0)),
+                "Inflacion": float(latest.get("inflation_rate", 0.0)),
+                "Cobertura canasta": float(latest.get("family_income_to_basket_ratio", 0.0)),
+                "Cobertura bienes basicos": float(latest.get("essential_fulfillment_rate", 0.0)),
+                "Utilidad percibida": float(latest.get("average_perceived_utility", 0.0)),
+                "Carga tributaria / PIB": float(latest.get("government_tax_burden_gdp", 0.0)),
+                "Deficit fiscal / PIB": float(latest.get("government_deficit_share_gdp", 0.0)),
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def render_parallel_comparison_section(
+    scenario_histories: dict[str, pd.DataFrame],
+) -> None:
+    comparison_summary = build_scenario_summary_table(scenario_histories)
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.subheader("Comparacion paralela de escenarios")
+    st.caption(
+        "Presets ilustrativos para contraste institucional. No intentan replicar exactamente a cada pais, "
+        "sino acercarse a un Estado de bienestar mas fuerte frente a uno mas liberal."
+    )
+    if not comparison_summary.empty:
+        styled_summary = comparison_summary.copy()
+        for column in ("PIB per capita",):
+            styled_summary[column] = styled_summary[column].map(money)
+        for column in (
+            "Desempleo",
+            "Inflacion",
+            "Cobertura canasta",
+            "Cobertura bienes basicos",
+            "Carga tributaria / PIB",
+            "Deficit fiscal / PIB",
+        ):
+            styled_summary[column] = styled_summary[column].map(pct)
+        st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+
+    compare_col_1, compare_col_2 = st.columns(2)
+    with compare_col_1:
+        st.plotly_chart(
+            make_scenario_comparison_chart(
+                scenario_histories,
+                "unemployment_rate",
+                title="Desempleo: Noruega vs Guatemala",
+                y_title="Tasa",
+            ),
+            use_container_width=True,
+        )
+    with compare_col_2:
+        st.plotly_chart(
+            make_scenario_comparison_chart(
+                scenario_histories,
+                "family_income_to_basket_ratio",
+                title="Cobertura ingreso/canasta",
+                y_title="Relacion",
+            ),
+            use_container_width=True,
+        )
+
+    compare_col_3, compare_col_4 = st.columns(2)
+    with compare_col_3:
+        st.plotly_chart(
+            make_scenario_comparison_chart(
+                scenario_histories,
+                "gdp_per_capita",
+                title="PIB per capita",
+                y_title="Unidades monetarias",
+            ),
+            use_container_width=True,
+        )
+    with compare_col_4:
+        st.plotly_chart(
+            make_scenario_comparison_chart(
+                scenario_histories,
+                "inflation_rate",
+                title="Inflacion mensual",
+                y_title="Tasa",
+            ),
+            use_container_width=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _money_flow_link_color(value: float, max_value: float) -> str:
@@ -1261,6 +1532,17 @@ with st.sidebar:
         title="Politica inicial",
     )
     policy_change_enabled = st.checkbox("Activar cambio de politica por periodo", value=False)
+    parallel_preset_compare_enabled = st.checkbox(
+        "Comparar en paralelo Noruega vs Guatemala",
+        value=False,
+    )
+    compare_only_fast_mode = False
+    if parallel_preset_compare_enabled:
+        compare_only_fast_mode = st.checkbox(
+            "Modo rapido: solo comparacion",
+            value=True,
+            help="Omite el tablero completo base y corre solo los dos escenarios paralelos.",
+        )
     policy_change_period: int | None = None
     shock_policy_values: dict[str, float | str] | None = None
     if policy_change_enabled:
@@ -1287,6 +1569,11 @@ with st.sidebar:
         "Puedes correr una politica inicial y, si activas el cambio de politica, aplicar un segundo "
         "paquete de variables desde el mes que elijas."
     )
+    if parallel_preset_compare_enabled:
+        st.caption(
+            "La comparacion paralela usa dos presets ilustrativos: un Estado de bienestar mas robusto "
+            "y una configuracion mas liberal. Se ejecutan en procesos separados."
+        )
     st.markdown(f"La poblacion inicial queda fija en {INITIAL_HOUSEHOLDS} hogares/agentes para la linea base.")
     st.markdown("La simulacion es determinista con los mismos parametros y la misma semilla.")
     if "view_period" not in st.session_state:
@@ -1302,6 +1589,17 @@ with st.sidebar:
     if nav_next.button("Mes siguiente", use_container_width=True, disabled=st.session_state.view_period >= total_months):
         st.session_state.view_period += 1
         st.rerun()
+
+if parallel_preset_compare_enabled and compare_only_fast_mode:
+    with st.spinner("Corriendo Noruega y Guatemala en procesos paralelos..."):
+        scenario_histories = run_parallel_preset_histories(
+            total_months,
+            seed,
+            firms_per_sector,
+            cache_version=RUN_MODEL_CACHE_VERSION,
+        )
+    render_parallel_comparison_section(scenario_histories)
+    st.stop()
 
 
 result, history_df = run_model(
@@ -1525,6 +1823,16 @@ with metric_cols_8[3]:
     st.metric("Prestamos / depositos", f"{latest_period['bank_loan_to_deposit_ratio']:.2f}")
 
 st.markdown("</div>", unsafe_allow_html=True)
+
+if parallel_preset_compare_enabled and not compare_only_fast_mode:
+    with st.spinner("Corriendo Noruega y Guatemala en procesos paralelos..."):
+        scenario_histories = run_parallel_preset_histories(
+            total_months,
+            seed,
+            firms_per_sector,
+            cache_version=RUN_MODEL_CACHE_VERSION,
+        )
+    render_parallel_comparison_section(scenario_histories)
 
 tab_monthly, tab_summary, tab_distribution, tab_firms, tab_data = st.tabs(
     ["Evolucion mensual", "Resumen mensual", "Distribucion", "Empresas", "Datos"]
@@ -2066,6 +2374,15 @@ with tab_monthly:
         st.markdown("</div>", unsafe_allow_html=True)
     with c_bank_2:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
+        if (
+            latest_period["bank_insolvent_share"] > 0.0
+            or latest_period.get("bank_undercapitalized_share", 0.0) > 0.0
+            or latest_period.get("bank_recapitalization", 0.0) > 0.0
+        ):
+            st.warning(
+                "Hubo tension bancaria en el horizonte visible. "
+                "La serie de bancos subcapitalizados, insolventes y la restauracion de capital muestran cuando el sistema entro en vigilancia o tuvo que intervenir."
+            )
         st.plotly_chart(
             make_line_chart(
                 history_view_df,
@@ -2075,6 +2392,7 @@ with tab_monthly:
                     "bank_reserve_coverage_ratio",
                     "bank_loan_to_deposit_ratio",
                     "bank_liquidity_ratio",
+                    "bank_undercapitalized_share",
                     "bank_insolvent_share",
                 ],
                 title="Salud y prudencia de bancos comerciales",
@@ -2090,15 +2408,28 @@ with tab_monthly:
             history_view_df,
             x="period",
             y_cols=[
-                "labor_share_gdp",
-                "profit_share_gdp",
+                "bank_recapitalization",
+                "bank_resolution_events",
+            ],
+            title="Restauracion de capital y resoluciones bancarias",
+            y_title="Monto / eventos",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "worker_consumption_share_gdp",
                 "investment_share_gdp",
                 "capitalist_consumption_share_gdp",
                 "government_spending_share_gdp",
-                "dividend_share_gdp",
-                "retained_profit_share_gdp",
             ],
-            title="Shares de flujo del PIB",
+            title="Componentes de gasto del PIB",
             y_title="Participacion",
         ),
         use_container_width=True,
@@ -2241,6 +2572,19 @@ with tab_summary:
             y_cols=["inflation_rate"],
             title="Inflacion mensual",
             y_title="Tasa",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=["average_perceived_utility"],
+            title="Utilidad promedio percibida",
+            y_title="Indice",
         ),
         use_container_width=True,
     )

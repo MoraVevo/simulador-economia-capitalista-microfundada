@@ -41,6 +41,7 @@ def history_frame(
         "gdp_growth": frame["gdp_nominal"].pct_change(),
         "gdp_per_capita_growth": frame["gdp_per_capita"].pct_change(),
         "population_growth": frame["population"].pct_change(),
+        "perceived_utility_growth": frame["average_perceived_utility"].pct_change(),
         "birth_death_balance": frame["births"] - frame["deaths"],
         "birth_rate": _safe_ratio(frame["births"], frame["population"]),
         "death_rate": _safe_ratio(frame["deaths"], frame["population"]),
@@ -83,6 +84,12 @@ def history_frame(
         "worker_consumption_spending": (
             frame["worker_cash_available"] - frame["worker_cash_saved"]
         ).clip(lower=0.0),
+        "worker_consumption_share_gdp": _safe_ratio(
+            (
+                frame["worker_cash_available"] - frame["worker_cash_saved"]
+            ).clip(lower=0.0),
+            frame["gdp_nominal"],
+        ),
         "capitalist_liquid_wealth": capitalist_liquid_wealth,
         "capitalist_augmented_assets": capitalist_augmented_assets,
         "worker_net_financial_position": frame["worker_bank_deposits"] - frame["worker_credit_outstanding"],
@@ -171,6 +178,7 @@ def annual_frame(history_frame: pd.DataFrame) -> pd.DataFrame:
             food_acute_hunger_share=("food_acute_hunger_share", "mean"),
             food_severe_hunger_share=("food_severe_hunger_share", "mean"),
             average_health_fragility=("average_health_fragility", "mean"),
+            average_perceived_utility=("average_perceived_utility", "mean"),
             total_sales_revenue=("total_sales_revenue", "sum"),
             total_production_units=("total_production_units", "sum"),
             period_investment_spending=("period_investment_spending", "sum"),
@@ -243,11 +251,14 @@ def annual_frame(history_frame: pd.DataFrame) -> pd.DataFrame:
             total_bank_assets=("total_bank_assets", "last"),
             total_bank_liabilities=("total_bank_liabilities", "last"),
             bank_equity=("bank_equity", "last"),
+            bank_recapitalization=("bank_recapitalization", "sum"),
+            bank_resolution_events=("bank_resolution_events", "sum"),
             bank_capital_ratio=("bank_capital_ratio", "mean"),
             bank_asset_liability_ratio=("bank_asset_liability_ratio", "mean"),
             bank_reserve_coverage_ratio=("bank_reserve_coverage_ratio", "mean"),
             bank_liquidity_ratio=("bank_liquidity_ratio", "mean"),
             bank_loan_to_deposit_ratio=("bank_loan_to_deposit_ratio", "mean"),
+            bank_undercapitalized_share=("bank_undercapitalized_share", "mean"),
             bank_insolvent_share=("bank_insolvent_share", "mean"),
             money_velocity=("money_velocity", "mean"),
             total_bankruptcies=("bankruptcies", "sum"),
@@ -276,6 +287,7 @@ def annual_frame(history_frame: pd.DataFrame) -> pd.DataFrame:
         "gdp_growth_yoy": annual["gdp_nominal"].pct_change(),
         "inflation_yoy": annual["end_price_index"].pct_change(),
         "population_growth_yoy": annual["end_population"].pct_change(),
+        "perceived_utility_growth_yoy": annual["average_perceived_utility"].pct_change(),
         "birth_rate": _safe_ratio(annual["births"], annual["population"]),
         "death_rate": _safe_ratio(annual["deaths"], annual["population"]),
         "child_share": _safe_ratio(annual["children"], annual["population"]),
@@ -303,6 +315,12 @@ def annual_frame(history_frame: pd.DataFrame) -> pd.DataFrame:
         "worker_consumption_spending": (
             annual["worker_cash_available"] - annual["worker_cash_saved"]
         ).clip(lower=0.0),
+        "worker_consumption_share_gdp": _safe_ratio(
+            (
+                annual["worker_cash_available"] - annual["worker_cash_saved"]
+            ).clip(lower=0.0),
+            annual["gdp_nominal"],
+        ),
         "capitalist_liquid_wealth": capitalist_liquid_wealth,
         "capitalist_augmented_assets": capitalist_augmented_assets,
         "worker_net_financial_position": annual["worker_bank_deposits"] - annual["worker_credit_outstanding"],

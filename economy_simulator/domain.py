@@ -124,6 +124,7 @@ class Household:
     clothing_deprivation_streak: int = 0
     health_fragility: float = 0.0
     last_consumption: dict[str, float] = field(default_factory=dict)
+    last_perceived_utility: float = 0.0
 
 
 @dataclass
@@ -133,6 +134,9 @@ class Entrepreneur:
     bank_id: int = 0
     vault_cash: float = 0.0
     consumption_propensity: float = 0.0
+    entry_appetite: float = 1.0
+    market_research_skill: float = 1.0
+    entry_optimism: float = 0.0
     loan_balance: float = 0.0
     active: bool = True
 
@@ -475,6 +479,7 @@ class PeriodSnapshot:
     food_acute_hunger_share: float
     food_severe_hunger_share: float
     average_health_fragility: float
+    average_perceived_utility: float
     total_sales_revenue: float
     total_production_units: float
     period_investment_spending: float
@@ -554,6 +559,9 @@ class PeriodSnapshot:
     total_bank_assets: float
     total_bank_liabilities: float
     bank_equity: float
+    bank_recapitalization: float
+    bank_resolution_events: int
+    bank_undercapitalized_share: float
     bank_capital_ratio: float
     bank_asset_liability_ratio: float
     bank_reserve_coverage_ratio: float

@@ -36,6 +36,10 @@ class EconomySimulation:
         self._period_household_desired_units_cache: dict[tuple[int, int, str], float] = {}
         self._period_essential_budget_cache: dict[int, tuple[int, float]] = {}
         self._period_family_groups_cache: dict[int, list[Household]] | None = None
+        self._period_household_labor_capacity_cache: dict[
+            int, tuple[tuple[int, float, int, int], float]
+        ] = {}
+        self._period_living_wage_anchor_cache: float | None = None
         self.history: list[PeriodSnapshot] = []
         self.firm_history: list[FirmPeriodSnapshot] = []
         self.households = self._build_households()
@@ -123,6 +127,10 @@ class EconomySimulation:
         self._period_government_bond_issuance = 0.0
         self._period_government_deficit = 0.0
         self._period_government_surplus = 0.0
+        self._period_bank_recapitalization = 0.0
+        self._period_bank_resolution_events = 0
+        self._period_bank_undercapitalized_share_signal = 0.0
+        self._period_bank_insolvent_share_signal = 0.0
         self._bankruptcies = 0
         self._period_births = 0
         self._period_deaths = 0
@@ -167,6 +175,7 @@ class EconomySimulation:
         self._match_labor()
         self._apply_central_bank_policy()
         self._accrue_bank_funding_costs()
+        self._stabilize_bank_capital_positions()
         self._apply_bank_credit_policy()
         self._produce_and_pay_wages()
         self._apply_government_household_support()
@@ -180,6 +189,7 @@ class EconomySimulation:
         self._apply_demography(current_unemployment)
         self._refresh_period_household_caches()
         self._refresh_period_family_cache()
+        self._resolve_bank_insolvency()
 
         snapshot = self._build_snapshot()
         self._roll_forward_sector_demand_signals()
@@ -227,6 +237,10 @@ class EconomySimulation:
         self._period_government_bond_issuance = 0.0
         self._period_government_deficit = 0.0
         self._period_government_surplus = 0.0
+        self._period_bank_recapitalization = 0.0
+        self._period_bank_resolution_events = 0
+        self._period_bank_undercapitalized_share_signal = 0.0
+        self._period_bank_insolvent_share_signal = 0.0
         self._bankruptcies = 0
         self._period_births = 0
         self._period_deaths = 0
@@ -269,6 +283,8 @@ class EconomySimulation:
         self._period_family_groups_cache = None
         self._period_household_desired_units_cache = {}
         self._period_essential_budget_cache = {}
+        self._period_household_labor_capacity_cache = {}
+        self._period_living_wage_anchor_cache = None
 
     def _refresh_period_sector_caches(self) -> None:
         active_firms_by_sector = {
@@ -285,6 +301,7 @@ class EconomySimulation:
             for sector_key, firms in active_firms_by_sector.items()
         }
         self._period_essential_budget_cache = {}
+        self._period_living_wage_anchor_cache = None
 
     def _refresh_period_family_cache(self) -> None:
         active_households = self._period_active_households_cache
@@ -337,6 +354,7 @@ class EconomySimulation:
             household.last_income = 0.0
             household.last_available_cash = 0.0
             household.last_consumption = {spec.key: 0.0 for spec in SECTOR_SPECS}
+            household.last_perceived_utility = 0.0
 
     def _update_household_reservation_wages(self) -> None:
         living_wage_anchor = self._living_wage_anchor()
@@ -447,7 +465,7 @@ class EconomySimulation:
     def _active_households(self) -> list[Household]:
         cached = self._period_active_households_cache
         if cached is not None:
-            return list(cached)
+            return cached
         return [household for household in self.households if household.alive]
 
     def _sector_firms(self, sector_key: str, active_only: bool = True) -> list[Firm]:
@@ -458,7 +476,7 @@ class EconomySimulation:
         if active_only:
             cached = self._period_active_firms_by_sector_cache
             if cached is not None:
-                return list(cached.get(sector_key, []))
+                return cached.get(sector_key, [])
             return [firm for firm in firms if firm.active]
         return list(firms)
 
@@ -509,15 +527,16 @@ class EconomySimulation:
 
         bought_total = 0.0
         ranked_firms = sorted(weighted_firms, key=lambda item: item[0].price)
+        suffix_weights = [0.0] * len(ranked_firms)
+        running_weight = 0.0
+        for index in range(len(ranked_firms) - 1, -1, -1):
+            running_weight += ranked_firms[index][1]
+            suffix_weights[index] = running_weight
         remaining_desired_units = desired_units
         for index, (firm, weight) in enumerate(ranked_firms):
             if cash <= 0.0 or remaining_desired_units <= 0.0:
                 break
-            remaining_weight = sum(
-                candidate_weight
-                for candidate_firm, candidate_weight in ranked_firms[index:]
-                if candidate_firm.inventory > 0.0
-            )
+            remaining_weight = suffix_weights[index]
             if remaining_weight <= 0.0:
                 break
             target_units = remaining_desired_units * (weight / remaining_weight)
@@ -745,6 +764,92 @@ class EconomySimulation:
         bond_risk_weight = clamp(self.config.bank_bond_risk_weight, 0.0, 1.0)
         return bank.loans_households + bank.loans_firms + bank.bond_holdings * bond_risk_weight
 
+    def _bank_capital_ratio(self, bank: CommercialBank) -> float:
+        risk_weighted_assets = self._bank_risk_weighted_assets(bank)
+        equity = self._bank_equity(bank)
+        if risk_weighted_assets <= 1e-9:
+            return 1.0 if equity >= 0.0 else -1.0
+        return equity / risk_weighted_assets
+
+    def _bank_warning_capital_ratio(self) -> float:
+        minimum_ratio = max(0.01, self.config.bank_min_capital_ratio)
+        return clamp(minimum_ratio + max(0.04, 1.00 * minimum_ratio), minimum_ratio + 0.02, 0.30)
+
+    def _bank_comfort_capital_ratio(self) -> float:
+        warning_ratio = self._bank_warning_capital_ratio()
+        minimum_ratio = max(0.01, self.config.bank_min_capital_ratio)
+        return clamp(warning_ratio + max(0.02, 0.75 * minimum_ratio), warning_ratio + 0.01, 0.40)
+
+    def _bank_private_backers(self, bank: CommercialBank) -> list[Entrepreneur]:
+        backers = [
+            owner
+            for owner in self.entrepreneurs
+            if owner.active and self._bank_id_for_entrepreneur(owner) == bank.id
+        ]
+        return sorted(backers, key=lambda owner: (owner.wealth + owner.vault_cash, -owner.id), reverse=True)
+
+    def _bank_private_capital_capacity(self, bank: CommercialBank, *, resolution_mode: bool = False) -> float:
+        if not self.entrepreneurs:
+            return 0.0
+        support_share = 1.20 if resolution_mode else 0.70
+        capacity = 0.0
+        for owner in self._bank_private_backers(bank):
+            committed_floor = self.config.firm_restart_wealth_threshold + (0.0 if resolution_mode else 20.0)
+            liquid_buffer = max(0.0, owner.wealth + 0.50 * owner.vault_cash - committed_floor)
+            capacity += liquid_buffer * support_share
+        return capacity
+
+    def _restore_bank_capital(
+        self,
+        bank: CommercialBank,
+        target_ratio: float,
+        *,
+        resolution_mode: bool = False,
+    ) -> float:
+        target_ratio = max(0.0, target_ratio)
+        current_equity = self._bank_equity(bank)
+        target_equity = target_ratio * self._bank_risk_weighted_assets(bank)
+        capital_shortfall = max(0.0, target_equity - current_equity)
+        if capital_shortfall <= 1e-9:
+            return 0.0
+        support_capacity = self._bank_private_capital_capacity(bank, resolution_mode=resolution_mode)
+        if support_capacity <= 1e-9:
+            return 0.0
+        injected = min(capital_shortfall, support_capacity)
+        bank.reserves += injected
+        self._period_bank_recapitalization += injected
+        return injected
+
+    def _bank_prudential_lending_multiplier(self, bank: CommercialBank) -> float:
+        minimum_ratio = max(0.01, self.config.bank_min_capital_ratio)
+        warning_ratio = self._bank_warning_capital_ratio()
+        comfort_ratio = self._bank_comfort_capital_ratio()
+        capital_ratio = self._bank_capital_ratio(bank)
+        if capital_ratio <= minimum_ratio:
+            capital_scale = 0.0
+        elif capital_ratio < warning_ratio:
+            progress = (capital_ratio - minimum_ratio) / max(1e-9, warning_ratio - minimum_ratio)
+            capital_scale = 0.10 + 0.25 * progress
+        elif capital_ratio < comfort_ratio:
+            progress = (capital_ratio - warning_ratio) / max(1e-9, comfort_ratio - warning_ratio)
+            capital_scale = 0.35 + 0.65 * progress
+        else:
+            capital_scale = 1.0
+
+        reserve_requirement = self._bank_reserve_requirement(bank)
+        reserve_scale = (
+            clamp(bank.reserves / max(1e-9, reserve_requirement), 0.0, 1.15)
+            if reserve_requirement > 0.0
+            else 1.0
+        )
+        discount_stress = clamp(
+            bank.central_bank_borrowing / max(1.0, bank.deposits + bank.reserves),
+            0.0,
+            2.0,
+        )
+        discount_scale = 1.0 - 0.45 * min(1.0, discount_stress)
+        return clamp(capital_scale * reserve_scale * discount_scale, 0.0, 1.0)
+
     def _bank_capital_lending_capacity(self, bank: CommercialBank) -> float:
         min_capital_ratio = max(1e-9, self.config.bank_min_capital_ratio)
         bank_equity = self._bank_equity(bank)
@@ -777,8 +882,10 @@ class EconomySimulation:
             if self._household_age_years(household) < self.config.entry_age_years
             else self._family_root_for_adult(household)
         )
-        members = self._family_groups().get(root_id, [household])
-        return [member for member in members if member.alive]
+        members = self._family_groups().get(root_id)
+        if members is not None:
+            return members
+        return [household] if household.alive else []
 
     def _projected_family_labor_income(self, members: list[Household]) -> float:
         total_income = 0.0
@@ -967,6 +1074,33 @@ class EconomySimulation:
             bank.interest_expense += funding_cost
             bank.profits -= funding_cost
 
+    def _stabilize_bank_capital_positions(self) -> None:
+        if not self.banks:
+            return
+
+        self._refresh_bank_balance_sheets()
+        self._reconcile_bank_reserves()
+        warning_ratio = self._bank_warning_capital_ratio()
+        undercapitalized_banks = 0
+        interventions_made = False
+        for bank in self.banks:
+            if self._bank_capital_ratio(bank) >= warning_ratio:
+                continue
+            undercapitalized_banks += 1
+            injected = self._restore_bank_capital(bank, warning_ratio)
+            interventions_made = interventions_made or injected > 0.0
+
+        if undercapitalized_banks > 0:
+            self._period_bank_undercapitalized_share_signal = max(
+                self._period_bank_undercapitalized_share_signal,
+                undercapitalized_banks / max(1, len(self.banks)),
+            )
+
+        if interventions_made:
+            self._refresh_bank_balance_sheets()
+            self._reconcile_bank_reserves()
+            self._update_bank_interest_rates()
+
     def _create_household_credit(self, borrower: Household, amount: float, bank: CommercialBank) -> float:
         amount = max(0.0, amount)
         if amount <= 0.0:
@@ -1032,7 +1166,8 @@ class EconomySimulation:
             if capacity <= 0.0:
                 continue
 
-            loan_pool = min(total_request, capacity)
+            prudential_scale = self._bank_prudential_lending_multiplier(bank)
+            loan_pool = min(total_request, capacity * prudential_scale)
             if loan_pool <= 0.0:
                 continue
 
@@ -1048,7 +1183,7 @@ class EconomySimulation:
 
             reserve_requirement = self._bank_reserve_requirement(bank)
             excess_reserves = max(0.0, bank.reserves - reserve_requirement)
-            if excess_reserves > 0.0:
+            if excess_reserves > 0.0 and prudential_scale >= 0.75:
                 bond_purchase = excess_reserves * clamp(self.config.bank_bond_allocation_share, 0.0, 1.0)
                 bond_purchase = min(bond_purchase, excess_reserves)
                 bank.reserves -= bond_purchase
@@ -1058,6 +1193,52 @@ class EconomySimulation:
         self._reconcile_bank_reserves()
         self.central_bank.money_supply = self._current_total_liquid_money()
         self._update_bank_interest_rates()
+
+    def _resolve_bank_insolvency(self) -> None:
+        if not self.banks:
+            return
+
+        self._refresh_bank_balance_sheets()
+        self._reconcile_bank_reserves()
+        warning_ratio = self._bank_warning_capital_ratio()
+        minimum_ratio = max(0.01, self.config.bank_min_capital_ratio)
+        insolvent_banks = 0
+        undercapitalized_banks = 0
+        interventions_made = False
+        for bank in self.banks:
+            current_equity = self._bank_equity(bank)
+            capital_ratio = self._bank_capital_ratio(bank)
+            if capital_ratio < warning_ratio:
+                undercapitalized_banks += 1
+            if current_equity < 0.0:
+                insolvent_banks += 1
+            restored = 0.0
+            if capital_ratio < warning_ratio:
+                restored = self._restore_bank_capital(bank, warning_ratio)
+                interventions_made = interventions_made or restored > 0.0
+            post_equity = self._bank_equity(bank)
+            post_ratio = self._bank_capital_ratio(bank)
+            if post_equity < 0.0 or post_ratio < minimum_ratio:
+                resolution_injection = self._restore_bank_capital(bank, warning_ratio, resolution_mode=True)
+                if resolution_injection > 0.0:
+                    self._period_bank_resolution_events += 1
+                    interventions_made = True
+
+        if undercapitalized_banks > 0:
+            self._period_bank_undercapitalized_share_signal = max(
+                self._period_bank_undercapitalized_share_signal,
+                undercapitalized_banks / max(1, len(self.banks)),
+            )
+        if insolvent_banks > 0:
+            self._period_bank_insolvent_share_signal = max(
+                self._period_bank_insolvent_share_signal,
+                insolvent_banks / max(1, len(self.banks)),
+            )
+
+        if interventions_made:
+            self._refresh_bank_balance_sheets()
+            self._reconcile_bank_reserves()
+            self._update_bank_interest_rates()
 
     def _current_price_index_estimate(self) -> float:
         return sum(
@@ -1107,6 +1288,19 @@ class EconomySimulation:
                 if reserve_requirement > 0.0
                 else 0.0
             )
+            warning_ratio = self._bank_warning_capital_ratio()
+            comfort_ratio = self._bank_comfort_capital_ratio()
+            capital_ratio = self._bank_capital_ratio(bank)
+            capital_stress = clamp(
+                (warning_ratio - capital_ratio) / max(1e-9, warning_ratio),
+                0.0,
+                2.0,
+            )
+            capital_relief = clamp(
+                (capital_ratio - warning_ratio) / max(1e-9, comfort_ratio - warning_ratio),
+                0.0,
+                1.0,
+            )
             discount_stress = clamp(
                 bank.central_bank_borrowing / max(1.0, bank.deposits + bank.reserves),
                 0.0,
@@ -1119,7 +1313,12 @@ class EconomySimulation:
             )
             loan_floor = max(0.005, self.config.bank_loan_rate, policy_rate + 0.005)
             bank.loan_rate = clamp(
-                loan_floor + 0.025 * reserve_stress + 0.040 * discount_stress - 0.010 * liquidity_relief,
+                loan_floor
+                + 0.025 * reserve_stress
+                + 0.040 * discount_stress
+                + 0.050 * capital_stress
+                - 0.010 * liquidity_relief
+                - 0.004 * capital_relief,
                 loan_floor,
                 self._bank_discount_window_rate() + 0.10,
             )
@@ -1128,6 +1327,13 @@ class EconomySimulation:
                 policy_rate * self.config.bank_deposit_rate_share
                 + 0.004 * liquidity_relief
                 - 0.003 * reserve_stress,
+                0.0,
+                max_deposit_rate,
+            )
+            bank.deposit_rate = clamp(
+                bank.deposit_rate
+                - 0.004 * capital_stress
+                + 0.002 * capital_relief,
                 0.0,
                 max_deposit_rate,
             )
@@ -1721,6 +1927,51 @@ class EconomySimulation:
         essential_coverage = max(0.0, essential_coverage)
         return clamp(0.60 * math.exp(-4.0 * max(0.0, essential_coverage - 1.0)), 0.05, 0.60)
 
+    def _coverage_saturation(self, coverage_ratio: float, intensity: float = 2.0) -> float:
+        coverage_ratio = max(0.0, coverage_ratio)
+        intensity = max(0.1, intensity)
+        return 1.0 - math.exp(-intensity * coverage_ratio)
+
+    def _family_essential_coverage_ratio(
+        self,
+        essential_target_by_sector: dict[str, float],
+        purchased_units_by_sector: dict[str, float],
+    ) -> float:
+        total_target = sum(max(0.0, target) for target in essential_target_by_sector.values())
+        if total_target <= 0.0:
+            return 1.0
+
+        weighted_coverage = 0.0
+        for sector_key, target_units in essential_target_by_sector.items():
+            if target_units <= 0.0:
+                continue
+            sector_coverage = purchased_units_by_sector.get(sector_key, 0.0) / target_units
+            weighted_coverage += target_units * sector_coverage
+        return clamp(weighted_coverage / total_target, 0.0, 3.0)
+
+    def _discretionary_sector_utility_weight(
+        self,
+        sector_key: str,
+        base_preference_units: float,
+        essential_coverage: float,
+        family_remaining_cash: float,
+        family_basic_basket_cost: float,
+    ) -> float:
+        if base_preference_units <= 0.0:
+            return 0.0
+
+        comfort_ratio = clamp((essential_coverage - 0.90) / 0.55, 0.0, 2.0)
+        liquidity_ratio = clamp(
+            family_remaining_cash / max(1.0, family_basic_basket_cost),
+            0.0,
+            2.5,
+        )
+        if sector_key == "leisure":
+            utility_multiplier = 1.10 + 1.45 * comfort_ratio + 0.65 * liquidity_ratio
+        else:
+            utility_multiplier = 1.00 + 0.55 * comfort_ratio + 0.22 * liquidity_ratio
+        return base_preference_units * utility_multiplier
+
     def _essential_affordability_pressure(self) -> float:
         if not self.history or len(self.history) < max(1, self.config.startup_grace_periods):
             return 0.0
@@ -1922,38 +2173,54 @@ class EconomySimulation:
 
     def _refresh_family_links(self) -> None:
         active_households = self._active_households()
-        age_lookup = {
-            household.id: self._household_age_years(household)
-            for household in active_households
-        }
+        if not active_households:
+            return
+
+        age_lookup: dict[int, float] = {}
+        males: list[Household] = []
+        females: list[Household] = []
+        entry_age_years = self.config.entry_age_years
+        fertile_age_max_years = self.config.fertile_age_max_years
+        households_by_id = self.households
 
         for household in active_households:
-            partner = self._household_by_id(household.partner_id) if household.partner_id is not None else None
-            if partner is not None and partner.alive and partner.partner_id == household.id:
-                continue
-            if household.partner_id is not None:
-                household.partner_id = None
+            age_years = self._household_age_years(household)
+            age_lookup[household.id] = age_years
 
-        males = [
-            household
-            for household in active_households
-            if household.sex == "M"
-            and household.partner_id is None
-            and self.config.entry_age_years <= age_lookup[household.id] <= self.config.fertile_age_max_years
-        ]
-        females = [
-            household
-            for household in active_households
-            if household.sex == "F"
-            and household.partner_id is None
-            and self.config.entry_age_years <= age_lookup[household.id] <= self.config.fertile_age_max_years
-        ]
+            partner_id = household.partner_id
+            if partner_id is not None:
+                partner = (
+                    households_by_id[partner_id]
+                    if 0 <= partner_id < len(households_by_id)
+                    else None
+                )
+                if partner is None or not partner.alive or partner.partner_id != household.id:
+                    household.partner_id = None
+
+            if household.partner_id is not None:
+                continue
+            if not (entry_age_years <= age_years <= fertile_age_max_years):
+                continue
+            if household.sex == "M":
+                males.append(household)
+            elif household.sex == "F":
+                females.append(household)
         if not males or not females:
             return
 
         males.sort(key=lambda household: (age_lookup[household.id], -household.savings, household.id))
         females.sort(key=lambda household: (age_lookup[household.id], -household.savings, household.id))
         female_ages = [age_lookup[household.id] for household in females]
+        female_savings = [household.savings for household in females]
+        female_desired_children = [household.desired_children for household in females]
+        next_unmatched = list(range(len(females) + 1))
+
+        # Skip women already matched earlier in this greedy pass without rescanning them.
+        def next_available_female(index: int) -> int:
+            while next_unmatched[index] != index:
+                next_unmatched[index] = next_unmatched[next_unmatched[index]]
+                index = next_unmatched[index]
+            return index
 
         for male in males:
             if male.partner_id is not None:
@@ -1962,30 +2229,32 @@ class EconomySimulation:
             male_age = age_lookup[male.id]
             lower_index = bisect.bisect_left(female_ages, male_age - 14.0)
             upper_index = bisect.bisect_right(female_ages, male_age + 14.0)
-            best_female = None
-            best_score = None
-            for female in females[lower_index:upper_index]:
-                if female.partner_id is not None:
-                    continue
-                female_age = age_lookup[female.id]
-                age_gap = abs(male_age - female_age)
-                if male.desired_children == 0 and female.desired_children == 0:
-                    continue
-                savings_gap = abs(male.savings - female.savings)
-                desire_bonus = (male.desired_children + female.desired_children) / 2.0
-                score = desire_bonus + 1.5 / (1.0 + age_gap) + 1.0 / (1.0 + savings_gap)
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_female = female
+            best_female_index = -1
+            best_score = 0.9
+            male_desired_children = male.desired_children
+            male_savings = male.savings
+            candidate_index = next_available_female(lower_index)
+            while candidate_index < upper_index:
+                female_age = female_ages[candidate_index]
+                female_desire = female_desired_children[candidate_index]
+                if male_desired_children != 0 or female_desire != 0:
+                    age_gap = abs(male_age - female_age)
+                    savings_gap = abs(male_savings - female_savings[candidate_index])
+                    desire_bonus = 0.5 * (male_desired_children + female_desire)
+                    score = desire_bonus + 1.5 / (1.0 + age_gap) + 1.0 / (1.0 + savings_gap)
+                    if score > best_score:
+                        best_score = score
+                        best_female_index = candidate_index
+                candidate_index = next_available_female(candidate_index + 1)
 
-            if best_female is None:
-                continue
-            if best_score is not None and best_score < 0.9:
+            if best_female_index < 0:
                 continue
 
+            best_female = females[best_female_index]
+            next_unmatched[best_female_index] = next_available_female(best_female_index + 1)
             male.partner_id = best_female.id
             best_female.partner_id = male.id
-            family_desire = round((male.desired_children + best_female.desired_children) / 2.0)
+            family_desire = round((male_desired_children + female_desired_children[best_female_index]) / 2.0)
             male.desired_children = family_desire
             best_female.desired_children = family_desire
             if male.last_birth_period < 0:
@@ -2177,13 +2446,22 @@ class EconomySimulation:
         ]
 
     def _household_labor_capacity(self, household: Household) -> float:
+        state_key = (
+            household.age_periods,
+            household.health_fragility,
+            household.housing_deprivation_streak,
+            household.clothing_deprivation_streak,
+        )
+        cached = self._period_household_labor_capacity_cache.get(household.id)
+        if cached is not None and cached[0] == state_key:
+            return cached[1]
         age_years = self._household_age_years(household)
         if age_years < self.config.entry_age_years:
-            return 0.0
-        if age_years < self.config.senior_age_years:
+            capacity = 0.0
+        elif age_years < self.config.senior_age_years:
             base_capacity = 1.0
         elif age_years >= self.config.max_age_years:
-            return 0.0
+            capacity = 0.0
         else:
             retirement_span = max(1.0, self.config.retirement_age_years - self.config.senior_age_years)
             progress = clamp((age_years - self.config.senior_age_years) / retirement_span, 0.0, 1.0)
@@ -2192,10 +2470,13 @@ class EconomySimulation:
                 self.config.senior_productivity_floor,
                 1.0,
             )
-        fragility_penalty = clamp(0.12 * household.health_fragility, 0.0, 0.45)
-        housing_penalty = clamp(0.03 * household.housing_deprivation_streak, 0.0, 0.15)
-        clothing_penalty = clamp(0.02 * household.clothing_deprivation_streak, 0.0, 0.10)
-        return clamp(base_capacity * (1.0 - fragility_penalty - housing_penalty - clothing_penalty), 0.0, 1.0)
+        if age_years >= self.config.entry_age_years and age_years < self.config.max_age_years:
+            fragility_penalty = clamp(0.12 * household.health_fragility, 0.0, 0.45)
+            housing_penalty = clamp(0.03 * household.housing_deprivation_streak, 0.0, 0.15)
+            clothing_penalty = clamp(0.02 * household.clothing_deprivation_streak, 0.0, 0.10)
+            capacity = clamp(base_capacity * (1.0 - fragility_penalty - housing_penalty - clothing_penalty), 0.0, 1.0)
+        self._period_household_labor_capacity_cache[household.id] = (state_key, capacity)
+        return capacity
 
     def _in_startup_grace(self) -> bool:
         return self.period <= max(0, self.config.startup_grace_periods)
@@ -2292,6 +2573,51 @@ class EconomySimulation:
     def _household_food_meals_consumed(self, household: Household) -> float:
         return self._household_sector_coverage(household, "food") * self._household_food_sufficient_meals(household)
 
+    def _household_perceived_utility(
+        self,
+        household: Household,
+        *,
+        family_remaining_cash: float,
+        family_basic_basket_cost: float,
+    ) -> float:
+        essential_coverages = [
+            self._household_sector_coverage(household, sector_key)
+            for sector_key in ESSENTIAL_SECTOR_KEYS
+        ]
+        average_essential_coverage = (
+            sum(essential_coverages) / len(essential_coverages)
+            if essential_coverages
+            else 1.0
+        )
+        liquidity_security = clamp(
+            family_remaining_cash / max(1.0, family_basic_basket_cost),
+            0.0,
+            2.0,
+        )
+
+        utility = 0.0
+        for spec in SECTOR_SPECS:
+            coverage = self._household_sector_coverage(household, spec.key)
+            preference = self._household_sector_preference(household, spec.key)
+            preference_scalar = clamp(0.55 + 0.45 * preference, 0.35, 1.60)
+            if spec.key in ESSENTIAL_SECTOR_KEYS:
+                sector_utility = spec.essential_need * self._coverage_saturation(coverage, intensity=3.0)
+            else:
+                affluence_gain = max(0.0, average_essential_coverage - 0.90)
+                if spec.key == "leisure":
+                    utility_multiplier = 1.0 + 1.55 * affluence_gain + 0.45 * liquidity_security
+                else:
+                    utility_multiplier = 1.0 + 0.60 * affluence_gain + 0.18 * liquidity_security
+                sector_utility = (
+                    spec.discretionary_weight
+                    * self._coverage_saturation(coverage, intensity=1.7)
+                    * utility_multiplier
+                )
+            utility += preference_scalar * sector_utility
+
+        utility += 0.08 * liquidity_security
+        return max(0.0, utility)
+
     def _food_subsistence_coverage_ratio(self) -> float:
         return self.config.food_meals_per_day_subsistence / max(1e-9, self.config.food_meals_per_day_sufficient)
 
@@ -2339,7 +2665,7 @@ class EconomySimulation:
     def _family_groups(self) -> dict[int, list[Household]]:
         cached = self._period_family_groups_cache
         if cached is not None:
-            return {root_id: list(members) for root_id, members in cached.items()}
+            return cached
 
         groups: dict[int, list[Household]] = {}
         for household in self._active_households():
@@ -2488,16 +2814,20 @@ class EconomySimulation:
         )
 
     def _living_wage_anchor(self) -> float:
-        active_households = self._active_households()
-        labor_force = sum(
-            1
-            for household in active_households
-            if self._household_labor_capacity(household) > 0.0
-        )
-        if labor_force <= 0:
-            return 0.0
-        total_essential_basket = sum(self._essential_budget(household) for household in active_households)
-        return total_essential_basket / labor_force
+        cached = self._period_living_wage_anchor_cache
+        if cached is not None:
+            return cached
+
+        labor_force = 0
+        total_essential_basket = 0.0
+        for household in self._active_households():
+            if self._household_labor_capacity(household) > 0.0:
+                labor_force += 1
+            total_essential_basket += self._essential_budget(household)
+
+        anchor = total_essential_basket / labor_force if labor_force > 0 else 0.0
+        self._period_living_wage_anchor_cache = anchor
+        return anchor
 
     def _labor_force_participant_ids(self) -> set[int]:
         participant_ids: set[int] = set()
@@ -3199,16 +3529,109 @@ class EconomySimulation:
         critical_cash_limit = min(self.config.critical_cash_threshold, -1.00 * operating_scale)
         return grace_cash_limit, critical_cash_limit
 
-    def _best_entry_owner(self) -> Entrepreneur | None:
-        threshold = self.config.firm_restart_wealth_threshold
-        candidates = [
-            owner
-            for owner in self.entrepreneurs
-            if self._owner_total_liquid(owner) - threshold > 0.0
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda owner: self._owner_total_liquid(owner))
+    def _sector_profit_signal(self, sector_key: str) -> float:
+        sector_firms = self._sector_firms(sector_key)
+        if not sector_firms:
+            return 0.0
+
+        margins: list[float] = []
+        for firm in sector_firms:
+            reference_revenue = max(
+                1.0,
+                firm.last_revenue,
+                firm.last_sales * max(0.1, firm.price),
+                firm.last_expected_sales * max(0.1, firm.price),
+            )
+            margins.append(clamp(firm.last_profit / reference_revenue, -1.0, 1.0))
+        return sum(margins) / max(1, len(margins))
+
+    def _sector_entry_opportunity_signal(
+        self,
+        sector_key: str,
+        demand_signal: float,
+        entry_gap: float,
+    ) -> float:
+        gap_ratio = clamp(entry_gap / max(1.0, demand_signal), 0.0, 2.0)
+        walkaway_signal = self._sector_public_fragility_signal(sector_key)
+        profitability_signal = max(0.0, self._sector_profit_signal(sector_key))
+        economy_fragility = self._economy_public_fragility_signal()
+        social_fragility = self._social_survival_fragility_signal(sector_key)
+        affluence_signal = 0.0
+        if self.history:
+            last_snapshot = self.history[-1]
+            affluence_signal = clamp(
+                last_snapshot.family_resources_to_basket_ratio - 1.0,
+                0.0,
+                1.5,
+            )
+        if sector_key == "leisure":
+            affluence_signal *= 1.25
+        return clamp(
+            0.55 * gap_ratio
+            + 0.25 * walkaway_signal
+            + 0.25 * profitability_signal
+            + 0.20 * affluence_signal
+            - 0.22 * economy_fragility
+            - 0.12 * social_fragility,
+            -1.0,
+            2.5,
+        )
+
+    def _entry_owner_score(
+        self,
+        owner: Entrepreneur,
+        sector_key: str,
+        opportunity_signal: float,
+        base_restart_cost: float,
+    ) -> tuple[float, float]:
+        available_surplus = self._owner_total_liquid(owner) - self.config.firm_restart_wealth_threshold
+        if available_surplus <= 0.0 or base_restart_cost <= 0.0:
+            return float("-inf"), float("inf")
+
+        liquidity_ratio = clamp(available_surplus / base_restart_cost, 0.0, 4.0)
+        sector_bias = 0.0
+        if sector_key == "leisure":
+            sector_bias = 0.10 * max(0.0, owner.entry_appetite - 0.90)
+        research_quality = clamp(owner.market_research_skill, 0.40, 1.80)
+        perception_noise = self.rng.gauss(
+            owner.entry_optimism + sector_bias,
+            0.28 / research_quality,
+        )
+        expected_signal = opportunity_signal + perception_noise
+        score = (
+            expected_signal * (0.80 + 0.30 * research_quality)
+            + 0.22 * liquidity_ratio
+            + 0.28 * (owner.entry_appetite - 1.0)
+        )
+        threshold = 0.82 - 0.22 * (owner.entry_appetite - 1.0) - 0.12 * (research_quality - 1.0)
+        return score, threshold
+
+    def _select_entry_owner(
+        self,
+        sector_key: str,
+        demand_signal: float,
+        entry_gap: float,
+        base_restart_cost: float,
+    ) -> Entrepreneur | None:
+        opportunity_signal = self._sector_entry_opportunity_signal(
+            sector_key,
+            demand_signal,
+            entry_gap,
+        )
+        best_owner: Entrepreneur | None = None
+        best_score = float("-inf")
+        for owner in self.entrepreneurs:
+            score, threshold = self._entry_owner_score(
+                owner,
+                sector_key,
+                opportunity_signal,
+                base_restart_cost,
+            )
+            if score < threshold or score <= best_score:
+                continue
+            best_owner = owner
+            best_score = score
+        return best_owner
 
     def _best_peer_firm(self, sector_key: str, exclude_firm_id: int | None = None) -> Firm | None:
         peers = [
@@ -3914,6 +4337,9 @@ class EconomySimulation:
                 Entrepreneur(
                     id=owner_id,
                     wealth=capitalist_wealth_pool * wealth_share,
+                    entry_appetite=self.rng.uniform(0.70, 1.45),
+                    market_research_skill=self.rng.uniform(0.60, 1.45),
+                    entry_optimism=self.rng.uniform(-0.18, 0.24),
                 )
             )
         return entrepreneurs
@@ -4834,6 +5260,11 @@ class EconomySimulation:
             1.0,
         )
         member.money_trust = clamp(0.85 * member.money_trust + 0.15 * trust_signal, 0.0, 1.0)
+        member.last_perceived_utility = self._household_perceived_utility(
+            member,
+            family_remaining_cash=family_remaining_cash,
+            family_basic_basket_cost=family_basic_basket_cost,
+        )
 
     def _consume_households(self) -> None:
         discretionary_firms = [firm for key in DISCRETIONARY_SECTOR_KEYS for firm in self._sector_firms(key)]
@@ -4990,23 +5421,42 @@ class EconomySimulation:
 
             if neutral_nonessential_budget > 0.0:
                 sector_preference_units: dict[str, float] = {}
-                total_preference_units = 0.0
                 for sector_key in DISCRETIONARY_SECTOR_KEYS:
                     preference_units = sum(
                         self._household_sector_desired_units(member, sector_key)
                         for member in family_members
                     )
                     sector_preference_units[sector_key] = preference_units
-                    total_preference_units += preference_units
+                total_preference_units = sum(sector_preference_units.values())
                 if total_preference_units <= 0.0:
-                    total_preference_units = float(len(DISCRETIONARY_SECTOR_KEYS))
                     sector_preference_units = {key: 1.0 for key in DISCRETIONARY_SECTOR_KEYS}
+                essential_coverage = self._family_essential_coverage_ratio(
+                    essential_target_by_sector,
+                    purchased_units_by_sector,
+                )
+                sector_utility_weights = {
+                    sector_key: self._discretionary_sector_utility_weight(
+                        sector_key,
+                        base_preference_units,
+                        essential_coverage,
+                        cash,
+                        family_basic_basket_cost,
+                    )
+                    for sector_key, base_preference_units in sector_preference_units.items()
+                }
+                total_utility_weight = sum(sector_utility_weights.values())
+                if total_utility_weight <= 0.0:
+                    sector_utility_weights = sector_preference_units.copy()
+                    total_utility_weight = sum(sector_utility_weights.values())
+                if total_utility_weight <= 0.0:
+                    sector_utility_weights = {key: 1.0 for key in DISCRETIONARY_SECTOR_KEYS}
+                    total_utility_weight = float(len(DISCRETIONARY_SECTOR_KEYS))
 
                 for sector_key in DISCRETIONARY_SECTOR_KEYS:
                     if cash <= 0.0:
                         continue
                     spec = SECTOR_BY_KEY[sector_key]
-                    share = sector_preference_units[sector_key] / total_preference_units
+                    share = sector_utility_weights[sector_key] / total_utility_weight
                     neutral_spend = neutral_nonessential_budget * share
                     intended_spend = effective_nonessential_budget * share
                     average_price = self._average_sector_price(sector_key)
@@ -5018,13 +5468,14 @@ class EconomySimulation:
                     sector_firms = self._sector_firms(sector_key)
                     if not sector_firms:
                         continue
-                    cash, _ = self._purchase_from_sector(
+                    cash, units_bought = self._purchase_from_sector(
                         family_price_sensitivity,
                         sector_key,
                         desired_units,
                         cash,
                         spending_log,
                     )
+                    purchased_units_by_sector[sector_key] += units_bought
 
             family_remaining_cash = max(0.0, cash)
             unmet_basic_essentials = max(0.0, essential_target_units - baseline_essential_units_bought)
@@ -5059,6 +5510,8 @@ class EconomySimulation:
                 purchased_units_by_sector=purchased_units_by_sector,
                 family_remaining_cash=family_remaining_cash,
             )
+
+        self._period_living_wage_anchor_cache = None
 
     def _consume_entrepreneur(self, owner: Entrepreneur, budget: float) -> float:
         budget = max(0.0, budget)
@@ -5397,9 +5850,18 @@ class EconomySimulation:
             if entry_gap <= 1.0:
                 continue
             entry_firm = min(inactive_firms, key=lambda firm: firm.id)
-            self._restart_firm(entry_firm, demand_signal=entry_gap)
+            self._restart_firm(
+                entry_firm,
+                demand_signal=demand_signal,
+                entry_gap=entry_gap,
+            )
 
-    def _restart_firm(self, firm: Firm, demand_signal: float | None = None) -> bool:
+    def _restart_firm(
+        self,
+        firm: Firm,
+        demand_signal: float | None = None,
+        entry_gap: float | None = None,
+    ) -> bool:
         spec = SECTOR_BY_KEY[firm.sector]
         target_demand = max(
             0.0,
@@ -5412,7 +5874,13 @@ class EconomySimulation:
         if base_restart_cost <= 0.0:
             return False
 
-        owner = self._best_entry_owner()
+        perceived_gap = max(0.0, entry_gap if entry_gap is not None else target_demand)
+        owner = self._select_entry_owner(
+            spec.key,
+            target_demand,
+            perceived_gap,
+            base_restart_cost,
+        )
         if owner is None:
             return False
 
@@ -5677,6 +6145,19 @@ class EconomySimulation:
             )
             < bank_deposits_by_id.get(bank.id, 0.0) + bank.central_bank_borrowing
         )
+        insolvent_share = max(
+            insolvent_banks / max(1, len(active_banks)),
+            self._period_bank_insolvent_share_signal,
+        )
+        undercapitalized_banks = sum(
+            1
+            for bank in active_banks
+            if self._bank_capital_ratio(bank) < self._bank_warning_capital_ratio()
+        )
+        undercapitalized_share = max(
+            undercapitalized_banks / max(1, len(active_banks)),
+            self._period_bank_undercapitalized_share_signal,
+        )
         bank_capital_ratio = bank_equity / max(1e-9, total_bank_assets)
         bank_asset_liability_ratio = total_bank_assets / max(1e-9, total_bank_liabilities)
         bank_reserve_coverage_ratio = (
@@ -5705,10 +6186,12 @@ class EconomySimulation:
         food_severe_hunger_count = 0
         total_food_meals = 0.0
         total_health_fragility = 0.0
+        total_perceived_utility = 0.0
         for household in active_households:
             meals = self._household_food_meals_consumed(household)
             total_food_meals += meals
             total_health_fragility += household.health_fragility
+            total_perceived_utility += household.last_perceived_utility
             sufficient_meals = self._household_food_sufficient_meals(household)
             subsistence_meals = self._household_food_subsistence_meals(household)
             severe_meals = self._household_food_severe_hunger_meals(household)
@@ -5722,6 +6205,7 @@ class EconomySimulation:
                 food_severe_hunger_count += 1
         average_food_meals_per_person = total_food_meals / max(1, population)
         average_health_fragility = total_health_fragility / max(1, population)
+        average_perceived_utility = total_perceived_utility / max(1, population)
 
         return PeriodSnapshot(
             period=self.period,
@@ -5768,6 +6252,7 @@ class EconomySimulation:
             food_acute_hunger_share=food_acute_hunger_count / max(1, population),
             food_severe_hunger_share=food_severe_hunger_count / max(1, population),
             average_health_fragility=average_health_fragility,
+            average_perceived_utility=average_perceived_utility,
             total_sales_revenue=self._period_sales_revenue,
             total_production_units=self._period_production_units,
             period_investment_spending=self._period_investment_spending,
@@ -5849,12 +6334,15 @@ class EconomySimulation:
             total_bank_assets=total_bank_assets,
             total_bank_liabilities=total_bank_liabilities,
             bank_equity=bank_equity,
+            bank_recapitalization=self._period_bank_recapitalization,
+            bank_resolution_events=self._period_bank_resolution_events,
+            bank_undercapitalized_share=undercapitalized_share,
             bank_capital_ratio=bank_capital_ratio,
             bank_asset_liability_ratio=bank_asset_liability_ratio,
             bank_reserve_coverage_ratio=bank_reserve_coverage_ratio,
             bank_liquidity_ratio=bank_liquidity_ratio,
             bank_loan_to_deposit_ratio=bank_loan_to_deposit_ratio,
-            bank_insolvent_share=insolvent_banks / max(1, len(active_banks)),
+            bank_insolvent_share=insolvent_share,
             money_velocity=money_velocity,
             total_liquid_money=total_liquid_money,
             total_household_savings=sum(household.savings for household in active_households),
