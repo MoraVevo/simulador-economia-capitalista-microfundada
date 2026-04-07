@@ -14,12 +14,14 @@ import streamlit as st
 
 from economy_simulator import EconomySimulation, ESSENTIAL_SECTOR_KEYS, SECTOR_BY_KEY, SECTOR_SPECS, SimulationConfig
 from economy_simulator.domain import SimulationResult
-from economy_simulator.reporting import firm_history_frame, firm_period_summary, simulation_frames
+from economy_simulator.policies import default_policy_values, scenario_policy_presets
+from economy_simulator.reporting import core_history_frame, firm_history_frame, firm_period_summary, history_frame
 
 INITIAL_HOUSEHOLDS = 10000
 MONTH_PRESETS = [12, 24, 60, 120, 240]
 PERIODS_PER_YEAR = 12
-RUN_MODEL_CACHE_VERSION = 26
+RUN_MODEL_CACHE_VERSION = 27
+CORE_DASHBOARD_ONLY = True
 CENTRAL_BANK_RULE_OPTIONS = {
     "Emision por crecimiento de bienes": "goods_growth",
     "Fisher": "fisher",
@@ -32,7 +34,11 @@ DEFAULT_POLICY_CONFIG = SimulationConfig()
 COLUMN_LABELS = {
     "gdp_nominal": "PIB nominal",
     "real_gdp_nominal": "PIB real aproximado",
+    "potential_gdp_nominal": "PIB potencial aproximado",
+    "potential_real_gdp": "PIB potencial real aproximado",
+    "output_gap_share": "Brecha de producto",
     "price_index": "Indice de precios",
+    "cpi": "IPC",
     "inflation_rate": "Inflacion",
     "population": "Poblacion",
     "women": "Mujeres",
@@ -71,8 +77,31 @@ COLUMN_LABELS = {
     "worker_savings_rate": "Tasa agregada de ahorro voluntario",
     "worker_involuntary_retention_rate": "Tasa de retencion por racionamiento",
     "worker_consumption_share_gdp": "Consumo trabajador / PIB",
+    "household_final_consumption": "Consumo final de hogares",
+    "household_final_consumption_share_gdp": "Consumo final de hogares / PIB",
+    "government_final_consumption": "Consumo final del gobierno",
+    "government_final_consumption_share_gdp": "Consumo final del gobierno / PIB",
+    "gross_fixed_capital_formation": "Formacion bruta de capital fijo",
+    "gross_fixed_capital_formation_share_gdp": "Formacion bruta de capital fijo / PIB",
+    "change_in_inventories": "Cambio en inventarios",
+    "change_in_inventories_share_gdp": "Cambio en inventarios / PIB",
+    "gross_capital_formation": "Formacion bruta de capital",
+    "gross_capital_formation_share_gdp": "Formacion bruta de capital / PIB",
+    "government_education_spending_share_gdp": "Gasto publico educativo / PIB",
+    "government_school_spending_share_gdp": "Gasto escolar publico / PIB",
+    "government_university_spending_share_gdp": "Gasto universitario publico / PIB",
+    "exports": "Exportaciones",
+    "imports": "Importaciones",
+    "net_exports": "Exportaciones netas",
+    "net_exports_share_gdp": "Exportaciones netas / PIB",
+    "gdp_expenditure_sna": "PIB por gasto SNA",
+    "gdp_expenditure_gap": "Brecha identidad PIB-gasto",
+    "gdp_expenditure_gap_share_gdp": "Brecha identidad PIB-gasto / PIB",
     "employment_rate": "Empleo",
+    "employment_count": "Personas empleadas",
     "unemployment_rate": "Desempleo",
+    "average_wage": "Salario promedio",
+    "real_average_wage": "Salario real promedio",
     "average_workers": "Trabajadores promedio",
     "average_desired_workers": "Trabajadores deseados promedio",
     "average_vacancies": "Vacantes promedio",
@@ -112,8 +141,11 @@ COLUMN_LABELS = {
     "potential_demand_units": "Demanda potencial",
     "demand_fulfillment_rate": "Cobertura de demanda",
     "essential_demand_units": "Demanda basica necesaria",
+    "essential_production_units": "Bienes necesarios producidos",
     "essential_sales_units": "Compras basicas realizadas",
     "essential_fulfillment_rate": "Cobertura de bienes basicos",
+    "people_full_essential_coverage": "Personas con canasta esencial completa",
+    "full_essential_coverage_share": "Poblacion con canasta esencial completa",
     "average_food_meals_per_person": "Comidas promedio por persona",
     "food_sufficient_share": "Poblacion con alimentacion suficiente",
     "food_subsistence_share": "Poblacion en subsistencia alimentaria",
@@ -122,6 +154,36 @@ COLUMN_LABELS = {
     "average_health_fragility": "Fragilidad de salud promedio",
     "average_perceived_utility": "Utilidad promedio percibida",
     "perceived_utility_growth": "Cambio de utilidad percibida",
+    "school_age_population": "Poblacion en edad escolar",
+    "university_age_population": "Poblacion elegible para universidad",
+    "school_students": "Estudiantes escolares",
+    "university_students": "Estudiantes universitarios",
+    "school_enrollment_share": "Matricula escolar",
+    "university_enrollment_share": "Matricula universitaria",
+    "school_completion_share": "Adultos con escolaridad completa",
+    "university_completion_share": "Adultos con titulo universitario",
+    "school_labor_share": "Fuerza laboral con escolaridad completa",
+    "skilled_labor_share": "Fuerza laboral universitaria",
+    "low_resource_school_enrollment_share": "Matricula escolar desde hogares bajo canasta",
+    "low_resource_university_enrollment_share": "Matricula universitaria desde hogares bajo canasta",
+    "low_resource_university_student_share": "Estudiantes universitarios desde hogares bajo canasta",
+    "school_income_premium": "Prima de ingreso con escolaridad",
+    "university_income_premium": "Prima de ingreso universitaria",
+    "poverty_rate_without_university": "Pobreza sin universidad",
+    "poverty_rate_with_university": "Pobreza con universidad",
+    "tracked_origin_adults": "Adultos con origen social trazado",
+    "low_resource_origin_adults": "Adultos de origen bajo canasta",
+    "low_resource_origin_upward_mobility_share": "Movilidad ascendente desde origen bajo canasta",
+    "low_resource_origin_university_completion_share": "Origen bajo canasta con titulo universitario",
+    "low_resource_origin_university_upward_mobility_share": "Movilidad ascendente pobre con universidad",
+    "low_resource_origin_nonuniversity_upward_mobility_share": "Movilidad ascendente pobre sin universidad",
+    "skilled_job_demand_share": "Participacion de demanda de trabajo cualificado",
+    "skilled_job_fill_rate": "Cobertura de vacantes cualificadas",
+    "skilled_labor_supply_to_demand_ratio": "Oferta/demanda de trabajo cualificado",
+    "education_poverty_gap": "Brecha de pobreza por universidad",
+    "poor_origin_university_mobility_lift": "Ventaja de movilidad por universidad en origen pobre",
+    "active_school_firms": "Colegios privados activos",
+    "active_university_firms": "Universidades privadas activas",
     "labor_cost_per_product": "Costo laboral por unidad producida",
     "essential_basket_equivalents_produced": "Canastas esenciales completas producidas",
     "basic_goods_labor_cost_per_unit": "Costo laboral unitario basico",
@@ -163,6 +225,9 @@ COLUMN_LABELS = {
     "government_child_allowance": "Subsidio infantil",
     "government_basic_support": "Subsidio de canasta",
     "government_procurement_spending": "Compras publicas esenciales",
+    "government_education_spending": "Gasto publico educativo",
+    "government_school_spending": "Gasto publico escolar",
+    "government_university_spending": "Gasto publico universitario",
     "government_bond_issuance": "Emision de bonos publicos",
     "government_deficit": "Deficit fiscal",
     "government_deficit_share_gdp": "Deficit fiscal / PIB",
@@ -173,7 +238,7 @@ COLUMN_LABELS = {
     "government_wealth_tax_burden_gdp": "Impuesto a riqueza / PIB",
     "labor_share_gdp": "Participacion salarial del PIB",
     "profit_share_gdp": "Participacion de ganancias en el PIB",
-    "investment_share_gdp": "Participacion de inversion en el PIB",
+    "investment_share_gdp": "Inversion empresarial interna / PIB",
     "capitalist_consumption_share_gdp": "Consumo capitalista / PIB",
     "government_spending_share_gdp": "Gasto estatal / PIB",
     "dividend_share_gdp": "Dividendos / PIB",
@@ -384,112 +449,6 @@ def _build_simulation_result(simulation: EconomySimulation) -> SimulationResult:
         banks=simulation.banks,
         government=simulation.government,
     )
-
-
-def default_policy_values() -> dict[str, float | str]:
-    return {
-        "central_bank_rule": DEFAULT_POLICY_CONFIG.central_bank_rule,
-        "central_bank_goods_growth_pass_through": DEFAULT_POLICY_CONFIG.central_bank_goods_growth_pass_through,
-        "central_bank_target_velocity": DEFAULT_POLICY_CONFIG.central_bank_target_velocity,
-        "central_bank_target_annual_inflation": DEFAULT_POLICY_CONFIG.central_bank_target_annual_inflation,
-        "central_bank_policy_rate_base": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_base,
-        "central_bank_policy_rate_floor": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_floor,
-        "central_bank_policy_rate_ceiling": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_ceiling,
-        "central_bank_productivity_dividend_share": DEFAULT_POLICY_CONFIG.central_bank_productivity_dividend_share,
-        "reserve_ratio": DEFAULT_POLICY_CONFIG.reserve_ratio,
-        "bank_bond_allocation_share": DEFAULT_POLICY_CONFIG.bank_bond_allocation_share,
-        "bank_deposit_rate_share": DEFAULT_POLICY_CONFIG.bank_deposit_rate_share,
-        "government_corporate_tax_rate_low": DEFAULT_POLICY_CONFIG.government_corporate_tax_rate_low,
-        "government_corporate_tax_rate_mid": DEFAULT_POLICY_CONFIG.government_corporate_tax_rate_mid,
-        "government_corporate_tax_rate_high": DEFAULT_POLICY_CONFIG.government_corporate_tax_rate_high,
-        "government_dividend_tax_rate_low": DEFAULT_POLICY_CONFIG.government_dividend_tax_rate_low,
-        "government_dividend_tax_rate_mid": DEFAULT_POLICY_CONFIG.government_dividend_tax_rate_mid,
-        "government_dividend_tax_rate_high": DEFAULT_POLICY_CONFIG.government_dividend_tax_rate_high,
-        "government_wealth_tax_rate": DEFAULT_POLICY_CONFIG.government_wealth_tax_rate,
-        "government_wealth_tax_threshold_multiple": DEFAULT_POLICY_CONFIG.government_wealth_tax_threshold_multiple,
-        "government_unemployment_benefit_share": DEFAULT_POLICY_CONFIG.government_unemployment_benefit_share,
-        "government_child_allowance_share": DEFAULT_POLICY_CONFIG.government_child_allowance_share,
-        "government_basic_support_gap_share": DEFAULT_POLICY_CONFIG.government_basic_support_gap_share,
-        "government_procurement_gap_share": DEFAULT_POLICY_CONFIG.government_procurement_gap_share,
-        "government_procurement_price_sensitivity": DEFAULT_POLICY_CONFIG.government_procurement_price_sensitivity,
-        "government_spending_scale": DEFAULT_POLICY_CONFIG.government_spending_scale,
-        "government_spending_efficiency": DEFAULT_POLICY_CONFIG.government_spending_efficiency,
-    }
-
-
-def guatemala_policy_values() -> dict[str, float | str]:
-    values = default_policy_values()
-    values.update(
-        {
-            "central_bank_goods_growth_pass_through": 0.75,
-            "central_bank_target_velocity": 0.45,
-            "central_bank_target_annual_inflation": 0.045,
-            "central_bank_policy_rate_base": 0.07,
-            "central_bank_policy_rate_floor": 0.03,
-            "central_bank_policy_rate_ceiling": 0.18,
-            "central_bank_productivity_dividend_share": 0.25,
-            "reserve_ratio": 0.05,
-            "bank_bond_allocation_share": 0.20,
-            "bank_deposit_rate_share": 0.15,
-            "government_corporate_tax_rate_low": 0.05,
-            "government_corporate_tax_rate_mid": 0.10,
-            "government_corporate_tax_rate_high": 0.15,
-            "government_dividend_tax_rate_low": 0.02,
-            "government_dividend_tax_rate_mid": 0.05,
-            "government_dividend_tax_rate_high": 0.08,
-            "government_wealth_tax_rate": 0.000,
-            "government_wealth_tax_threshold_multiple": 40.0,
-            "government_unemployment_benefit_share": 0.05,
-            "government_child_allowance_share": 0.05,
-            "government_basic_support_gap_share": 0.08,
-            "government_procurement_gap_share": 0.08,
-            "government_procurement_price_sensitivity": 1.60,
-            "government_spending_scale": 0.35,
-            "government_spending_efficiency": 0.55,
-        }
-    )
-    return values
-
-
-def norway_policy_values() -> dict[str, float | str]:
-    values = default_policy_values()
-    values.update(
-        {
-            "central_bank_goods_growth_pass_through": 0.95,
-            "central_bank_target_velocity": 0.30,
-            "central_bank_target_annual_inflation": 0.020,
-            "central_bank_policy_rate_base": 0.03,
-            "central_bank_policy_rate_floor": 0.01,
-            "central_bank_policy_rate_ceiling": 0.10,
-            "central_bank_productivity_dividend_share": 0.60,
-            "reserve_ratio": 0.14,
-            "bank_bond_allocation_share": 0.45,
-            "bank_deposit_rate_share": 0.55,
-            "government_corporate_tax_rate_low": 0.20,
-            "government_corporate_tax_rate_mid": 0.28,
-            "government_corporate_tax_rate_high": 0.35,
-            "government_dividend_tax_rate_low": 0.15,
-            "government_dividend_tax_rate_mid": 0.22,
-            "government_dividend_tax_rate_high": 0.30,
-            "government_wealth_tax_rate": 0.012,
-            "government_wealth_tax_threshold_multiple": 12.0,
-            "government_unemployment_benefit_share": 0.60,
-            "government_child_allowance_share": 0.30,
-            "government_basic_support_gap_share": 0.65,
-            "government_procurement_gap_share": 0.75,
-            "government_procurement_price_sensitivity": 0.70,
-            "government_spending_scale": 1.35,
-            "government_spending_efficiency": 0.90,
-        }
-    )
-    return values
-
-
-def scenario_policy_presets() -> dict[str, dict[str, float | str]]:
-    return {
-        "Guatemala (mas liberal)": guatemala_policy_values(),
-        "Noruega (economia del bienestar)": norway_policy_values(),
-    }
 
 
 def render_policy_controls(
@@ -743,6 +702,7 @@ def run_model(
         seed=seed,
         periods_per_year=PERIODS_PER_YEAR,
         firms_per_sector=firms_per_sector,
+        track_firm_history=not CORE_DASHBOARD_ONLY,
     )
     config = _with_policy_values(config, base_policy_values)
     simulation = EconomySimulation(config)
@@ -754,7 +714,18 @@ def run_model(
                 simulation.config = _with_policy_values(simulation.config, shock_policy_values)
             simulation.step()
         result = _build_simulation_result(simulation)
-    history_df, _ = simulation_frames(result)
+    if CORE_DASHBOARD_ONLY:
+        history_df = core_history_frame(
+            result.history,
+            periods_per_year=result.config.periods_per_year,
+            target_unemployment=result.config.target_unemployment,
+        )
+    else:
+        history_df = history_frame(
+            result.history,
+            periods_per_year=result.config.periods_per_year,
+            target_unemployment=result.config.target_unemployment,
+        )
     return result, history_df
 
 
@@ -1044,7 +1015,11 @@ def make_institution_flow_chart(period_row: pd.Series) -> go.Figure:
     )
     wage_flow = max(0.0, float(period_row.get("total_wages", 0.0)))
     transfers = max(0.0, float(period_row.get("government_transfers", 0.0)))
-    procurement = max(0.0, float(period_row.get("government_procurement_spending", 0.0)))
+    procurement = max(
+        0.0,
+        float(period_row.get("government_procurement_spending", 0.0))
+        + float(period_row.get("government_education_spending", 0.0)),
+    )
     tax_flow = max(0.0, float(period_row.get("government_tax_revenue", 0.0)))
     bonds = max(0.0, float(period_row.get("government_bond_issuance", 0.0)))
     central_bank_issue = max(0.0, float(period_row.get("central_bank_issuance", 0.0)))
@@ -1611,10 +1586,402 @@ result, history_df = run_model(
     shock_policy_values,
     cache_version=RUN_MODEL_CACHE_VERSION,
 )
-firm_history_df = firm_history_frame(result)
-household_savings, owner_wealth = build_distribution_data(result)
 selected_period = min(st.session_state.view_period, total_months)
 history_view_df = history_df[history_df["period"] <= selected_period].copy()
+history_view = make_unique_columns(
+    history_view_df.drop(columns=HIDDEN_HISTORY_COLUMNS, errors="ignore").rename(columns=COLUMN_LABELS)
+)
+
+latest_period = history_view_df.iloc[-1] if not history_view_df.empty else None
+monthly_gdp_delta = fmt_delta(latest_period["gdp_growth"]) if latest_period is not None else None
+monthly_population_delta = fmt_delta(latest_period["population_growth"]) if latest_period is not None else None
+
+if CORE_DASHBOARD_ONLY:
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.subheader("Resumen macro")
+    st.caption(
+        f"Mostrando el mes {selected_period} de {total_months}. El tablero queda solo con las metricas macro clave, gobierno/banca y educacion-movilidad."
+    )
+    st.markdown(
+        "El PIB potencial se muestra como un proxy interno basado en utilizacion laboral, para vigilar capacidad ociosa sin fingir una identidad exacta."
+    )
+
+    metric_cols = st.columns(4)
+    with metric_cols[0]:
+        st.metric("PIB nominal", money(latest_period["gdp_nominal"]), delta=monthly_gdp_delta)
+    with metric_cols[1]:
+        st.metric("PIB real", money(latest_period["real_gdp_nominal"]))
+    with metric_cols[2]:
+        st.metric("PIB potencial", money(latest_period["potential_gdp_nominal"]))
+    with metric_cols[3]:
+        st.metric("IPC", f"{latest_period['cpi']:.3f}")
+
+    metric_cols_2 = st.columns(4)
+    with metric_cols_2[0]:
+        st.metric("Inflacion mensual", pct(latest_period["inflation_rate"]))
+    with metric_cols_2[1]:
+        st.metric("Desempleo", pct(latest_period["unemployment_rate"]))
+    with metric_cols_2[2]:
+        st.metric("Salario promedio", money(latest_period["average_wage"]))
+    with metric_cols_2[3]:
+        st.metric("Salario real", money(latest_period["real_average_wage"]))
+
+    metric_cols_3 = st.columns(4)
+    with metric_cols_3[0]:
+        st.metric("Poblacion", f"{int(latest_period['population']):,}", delta=monthly_population_delta)
+    with metric_cols_3[1]:
+        st.metric("Mujeres fertiles", f"{int(latest_period['fertile_women']):,}")
+    with metric_cols_3[2]:
+        st.metric("Nacimientos", f"{int(latest_period['births']):,}")
+    with metric_cols_3[3]:
+        st.metric("Muertes", f"{int(latest_period['deaths']):,}")
+
+    metric_cols_4 = st.columns(4)
+    with metric_cols_4[0]:
+        st.metric("Bienes necesarios producidos", f"{latest_period['essential_production_units']:.0f}")
+    with metric_cols_4[1]:
+        st.metric("Bienes necesarios comprados", f"{latest_period['essential_sales_units']:.0f}")
+    with metric_cols_4[2]:
+        st.metric("Patrimonio bancario", money(latest_period["bank_equity"]))
+    with metric_cols_4[3]:
+        st.metric("Deficit del gobierno", money(latest_period["government_deficit"]))
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if parallel_preset_compare_enabled and not compare_only_fast_mode:
+        with st.spinner("Corriendo Noruega y Guatemala en procesos paralelos..."):
+            scenario_histories = run_parallel_preset_histories(
+                total_months,
+                seed,
+                firms_per_sector,
+                cache_version=RUN_MODEL_CACHE_VERSION,
+            )
+        render_parallel_comparison_section(scenario_histories)
+
+    (
+        tab_macro,
+        tab_essentials,
+        tab_demography,
+        tab_public,
+        tab_education,
+        tab_data,
+    ) = st.tabs(
+        [
+            "Macro",
+            "Canasta y trabajo",
+            "Demografia",
+            "Gobierno y banca",
+            "Educacion y movilidad",
+            "Datos",
+        ]
+    )
+
+    with tab_macro:
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=["gdp_nominal", "real_gdp_nominal", "potential_gdp_nominal"],
+                    title="PIB nominal, real y potencial",
+                    y_title="Unidades monetarias",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=["inflation_rate", "unemployment_rate", "output_gap_share"],
+                    title="Inflacion, desempleo y brecha de producto",
+                    y_title="Tasa",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=["cpi", "average_wage", "real_average_wage"],
+                title="IPC y salarios",
+                y_title="Indice o unidades monetarias",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_essentials:
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=["essential_production_units", "essential_sales_units", "essential_demand_units"],
+                    title="Bienes necesarios producidos vs comprados",
+                    y_title="Unidades",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "people_full_essential_coverage",
+                        "full_essential_coverage_share",
+                        "family_income_to_basket_ratio",
+                    ],
+                    title="Cobertura real de canasta y capacidad de pago",
+                    y_title="Personas, tasa o ratio",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=["employment_count", "labor_force", "average_food_meals_per_person"],
+                title="Trabajo y disponibilidad material",
+                y_title="Personas o comidas",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_demography:
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=["population", "fertile_women"],
+                    title="Poblacion y mujeres fertiles",
+                    y_title="Personas",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=["births", "deaths", "birth_rate", "death_rate"],
+                    title="Natalidad y mortalidad",
+                    y_title="Personas o tasa",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_public:
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "government_tax_revenue",
+                        "government_total_spending",
+                        "government_deficit",
+                        "government_debt_outstanding",
+                    ],
+                    title="Gobierno",
+                    y_title="Unidades monetarias",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "bank_equity",
+                        "bank_capital_ratio",
+                        "bank_insolvent_share",
+                        "bank_undercapitalized_share",
+                    ],
+                    title="Salud bancaria",
+                    y_title="Unidades monetarias o tasa",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=[
+                    "central_bank_money_supply",
+                    "central_bank_policy_rate",
+                    "central_bank_issuance",
+                    "central_bank_target_money_supply",
+                ],
+                title="Banco central",
+                y_title="Dinero o tasa",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_education:
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "school_enrollment_share",
+                        "university_enrollment_share",
+                        "school_completion_share",
+                        "university_completion_share",
+                    ],
+                    title="Escolaridad y universidad",
+                    y_title="Participacion",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "low_resource_school_enrollment_share",
+                        "low_resource_university_enrollment_share",
+                        "low_resource_university_student_share",
+                    ],
+                    title="Acceso educativo desde hogares pobres",
+                    y_title="Participacion",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        left, right = st.columns(2)
+        with left:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "low_resource_origin_upward_mobility_share",
+                        "low_resource_origin_university_completion_share",
+                        "poor_origin_university_mobility_lift",
+                    ],
+                    title="Movilidad social desde origen pobre",
+                    y_title="Participacion o brecha",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown('<div class="panel">', unsafe_allow_html=True)
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "school_income_premium",
+                        "university_income_premium",
+                        "poverty_rate_without_university",
+                        "poverty_rate_with_university",
+                        "skilled_job_fill_rate",
+                    ],
+                    title="Retornos educativos y trabajo cualificado",
+                    y_title="Ratio o participacion",
+                ),
+                use_container_width=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with tab_data:
+        core_table_columns = [
+            "Mes",
+            "PIB nominal",
+            "PIB real aproximado",
+            "PIB potencial aproximado",
+            "IPC",
+            "Inflacion",
+            "Desempleo",
+            "Salario promedio",
+            "Salario real promedio",
+            "Poblacion",
+            "Mujeres fertiles",
+            "Nacimientos",
+            "Muertes",
+            "Bienes necesarios producidos",
+            "Compras basicas realizadas",
+            "Demanda basica necesaria",
+            "Personas con canasta esencial completa",
+            "Cobertura ingreso/canasta",
+            "Patrimonio neto bancario",
+            "Capital bancario / activos",
+            "Participacion de bancos insolventes",
+            "Oferta monetaria",
+            "Tasa lider del banco central",
+            "Recaudacion fiscal",
+            "Gasto total del Estado",
+            "Deficit fiscal",
+            "Deuda publica",
+            "Matricula escolar",
+            "Matricula universitaria",
+            "Adultos con escolaridad completa",
+            "Adultos con titulo universitario",
+            "Matricula escolar desde hogares bajo canasta",
+            "Matricula universitaria desde hogares bajo canasta",
+            "Movilidad ascendente desde origen bajo canasta",
+            "Prima de ingreso universitaria",
+            "Pobreza sin universidad",
+            "Pobreza con universidad",
+        ]
+        available_columns = [column for column in core_table_columns if column in history_view.columns]
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.dataframe(
+            history_view[available_columns],
+            width="stretch",
+            hide_index=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.stop()
+
+firm_history_df = firm_history_frame(result)
+household_savings, owner_wealth = build_distribution_data(result)
+history_full_view = make_unique_columns(
+    history_df.drop(columns=HIDDEN_HISTORY_COLUMNS, errors="ignore").rename(columns=COLUMN_LABELS)
+)
+monthly_gdp_pc_delta = fmt_delta(latest_period["gdp_per_capita_growth"]) if latest_period is not None else None
 firm_history_view_df = firm_history_df[firm_history_df["period"] <= selected_period].copy()
 firm_period_view_df = firm_history_view_df[firm_history_view_df["period"] == selected_period].copy()
 firm_period_view_df = firm_period_view_df.sort_values(["sector", "price"]).copy()
@@ -1644,18 +2011,7 @@ firm_summary_view_df = firm_summary_view_df.merge(
     how="left",
 )
 firm_summary_view_df["labor_supply_gap"] = firm_summary_view_df["labor_force"] - firm_summary_view_df["total_desired_workers"]
-history_view = make_unique_columns(
-    history_view_df.drop(columns=HIDDEN_HISTORY_COLUMNS, errors="ignore").rename(columns=COLUMN_LABELS)
-)
-history_full_view = make_unique_columns(
-    history_df.drop(columns=HIDDEN_HISTORY_COLUMNS, errors="ignore").rename(columns=COLUMN_LABELS)
-)
 firm_view = firm_period_view_df.rename(columns=FIRM_LABELS)
-
-latest_period = history_view_df.iloc[-1] if not history_view_df.empty else None
-monthly_gdp_delta = fmt_delta(latest_period["gdp_growth"]) if latest_period is not None else None
-monthly_population_delta = fmt_delta(latest_period["population_growth"]) if latest_period is not None else None
-monthly_gdp_pc_delta = fmt_delta(latest_period["gdp_per_capita_growth"]) if latest_period is not None else None
 
 st.markdown('<div class="panel">', unsafe_allow_html=True)
 st.subheader("Resumen macro y demografico")
@@ -1801,7 +2157,11 @@ metric_cols_7 = st.columns(3)
 with metric_cols_7[0]:
     st.metric("Recaudacion fiscal", money(latest_period["government_tax_revenue"]))
 with metric_cols_7[1]:
-    public_spending = latest_period["government_transfers"] + latest_period["government_procurement_spending"]
+    public_spending = (
+        latest_period["government_transfers"]
+        + latest_period["government_procurement_spending"]
+        + latest_period.get("government_education_spending", 0.0)
+    )
     st.metric("Gasto publico", money(public_spending))
 with metric_cols_7[2]:
     st.metric("Deficit fiscal / PIB", pct(latest_period["government_deficit_share_gdp"]))
@@ -2139,10 +2499,10 @@ with tab_monthly:
         st.markdown('<div class="panel">', unsafe_allow_html=True)
         st.plotly_chart(
             make_line_chart(
-                basic_goods_view_df,
+                basic_goods_price_view_df,
                 x="period",
-                y_cols=["labor_cost_per_product"],
-                title="Precio relativo del trabajo por producto producido",
+                y_cols=["basic_goods_labor_cost_per_unit"],
+                title="Costo laboral unitario en bienes necesarios",
                 y_title="Unidades monetarias por unidad",
             ),
             use_container_width=True,
@@ -2152,14 +2512,14 @@ with tab_monthly:
     st.markdown('<div class="panel">', unsafe_allow_html=True)
     st.plotly_chart(
         make_line_chart(
-            essential_survival_view_df,
+            history_view_df,
             x="period",
             y_cols=[
-                "essential_basket_equivalents_produced",
+                "people_full_essential_coverage",
                 "population",
             ],
-            title="Canastas esenciales completas producidas vs poblacion",
-            y_title="Canastas completas / personas",
+            title="Cobertura esencial completa vs poblacion",
+            y_title="Personas",
         ),
         use_container_width=True,
     )
@@ -2424,12 +2784,51 @@ with tab_monthly:
             history_view_df,
             x="period",
             y_cols=[
-                "worker_consumption_share_gdp",
-                "investment_share_gdp",
-                "capitalist_consumption_share_gdp",
-                "government_spending_share_gdp",
+                "household_final_consumption_share_gdp",
+                "government_final_consumption_share_gdp",
+                "gross_fixed_capital_formation_share_gdp",
+                "change_in_inventories_share_gdp",
+                "net_exports_share_gdp",
             ],
-            title="Componentes de gasto del PIB",
+            title="Componentes del PIB por gasto (SNA)",
+            y_title="Participacion",
+        ),
+        use_container_width=True,
+    )
+    st.caption(
+        "Aproximacion de cuentas nacionales: consumo final de hogares, consumo final del gobierno, "
+        "formacion bruta de capital fijo, cambio en inventarios y exportaciones netas. "
+        "En este modelo, exportaciones e importaciones aun estan fijadas en cero."
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "gross_capital_formation_share_gdp",
+                "gdp_expenditure_gap_share_gdp",
+            ],
+            title="Formacion bruta de capital y brecha de identidad",
+            y_title="Participacion",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "government_school_spending_share_gdp",
+                "government_university_spending_share_gdp",
+                "government_education_spending_share_gdp",
+            ],
+            title="Gasto publico educativo / PIB",
             y_title="Participacion",
         ),
         use_container_width=True,
@@ -2585,6 +2984,126 @@ with tab_summary:
             y_cols=["average_perceived_utility"],
             title="Utilidad promedio percibida",
             y_title="Indice",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "school_enrollment_share",
+                "university_enrollment_share",
+                "school_completion_share",
+                "university_completion_share",
+                "school_labor_share",
+                "skilled_labor_share",
+            ],
+            title="Educacion, matricula y calificacion laboral",
+            y_title="Participacion",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=["active_school_firms", "active_university_firms"],
+            title="Oferta privada educativa",
+            y_title="Firmas activas",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=["tracked_origin_adults", "low_resource_origin_adults"],
+            title="Cohorte con origen social trazado",
+            y_title="Personas",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "low_resource_school_enrollment_share",
+                "low_resource_university_enrollment_share",
+                "low_resource_university_student_share",
+            ],
+            title="Acceso educativo desde hogares bajo canasta",
+            y_title="Participacion",
+        ),
+        use_container_width=True,
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=[
+                    "low_resource_origin_upward_mobility_share",
+                    "low_resource_origin_university_completion_share",
+                    "low_resource_origin_university_upward_mobility_share",
+                    "low_resource_origin_nonuniversity_upward_mobility_share",
+                ],
+                title="Movilidad social desde origen bajo canasta",
+                y_title="Participacion",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c2:
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=[
+                    "school_income_premium",
+                    "university_income_premium",
+                    "education_poverty_gap",
+                    "poor_origin_university_mobility_lift",
+                ],
+                title="Retornos educativos y brechas sociales",
+                y_title="Ratio o brecha",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.plotly_chart(
+        make_line_chart(
+            history_view_df,
+            x="period",
+            y_cols=[
+                "poverty_rate_without_university",
+                "poverty_rate_with_university",
+                "skilled_job_demand_share",
+                "skilled_job_fill_rate",
+                "skilled_labor_supply_to_demand_ratio",
+            ],
+            title="Pobreza y tension de trabajo cualificado",
+            y_title="Participacion o ratio",
         ),
         use_container_width=True,
     )

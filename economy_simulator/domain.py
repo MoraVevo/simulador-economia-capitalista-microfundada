@@ -71,7 +71,7 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         key="leisure",
         name="Leisure / entertainment / simple technology",
         base_price=8.2,
-        base_wage=7.0,
+        base_wage=8.2,
         base_productivity=0.88,
         household_demand_share=0.10,
         essential_need=0.0,
@@ -79,11 +79,35 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         target_inventory_ratio=0.24,
         markup=0.23,
     ),
+    SectorSpec(
+        key="school",
+        name="School / basic education",
+        base_price=13.5,
+        base_wage=9.1,
+        base_productivity=0.84,
+        household_demand_share=0.08,
+        essential_need=0.0,
+        discretionary_weight=0.58,
+        target_inventory_ratio=0.08,
+        markup=0.18,
+    ),
+    SectorSpec(
+        key="university",
+        name="University / advanced education",
+        base_price=18.5,
+        base_wage=11.2,
+        base_productivity=0.80,
+        household_demand_share=0.07,
+        essential_need=0.0,
+        discretionary_weight=0.66,
+        target_inventory_ratio=0.07,
+        markup=0.20,
+    ),
 )
 
 SECTOR_BY_KEY = {spec.key: spec for spec in SECTOR_SPECS}
 ESSENTIAL_SECTOR_KEYS = ("food", "housing", "clothing")
-DISCRETIONARY_SECTOR_KEYS = ("manufactured", "leisure")
+DISCRETIONARY_SECTOR_KEYS = ("manufactured", "leisure", "school", "university")
 
 
 @dataclass
@@ -93,6 +117,7 @@ class Household:
     savings: float
     reservation_wage: float
     saving_propensity: float
+    higher_education_affinity: float
     money_trust: float
     consumption_impatience: float
     price_sensitivity: float
@@ -125,6 +150,12 @@ class Household:
     health_fragility: float = 0.0
     last_consumption: dict[str, float] = field(default_factory=dict)
     last_perceived_utility: float = 0.0
+    school_years_completed: float = 0.0
+    university_years_completed: float = 0.0
+    origin_record_period: int = -1
+    low_resource_origin: bool = False
+    origin_family_income_to_basket_ratio: float = 0.0
+    origin_family_resources_to_basket_ratio: float = 0.0
 
 
 @dataclass
@@ -184,6 +215,9 @@ class Government:
     child_allowance_this_period: float = 0.0
     basic_support_this_period: float = 0.0
     procurement_spending_this_period: float = 0.0
+    education_spending_this_period: float = 0.0
+    school_public_spending_this_period: float = 0.0
+    university_public_spending_this_period: float = 0.0
     bond_issuance_this_period: float = 0.0
     deficit_this_period: float = 0.0
     surplus_this_period: float = 0.0
@@ -321,16 +355,21 @@ class SimulationConfig:
     startup_firm_cash: float = 180.0
     startup_firm_capital: float = 80.0
     startup_inventory_multiplier: float = 0.75
+    startup_expected_sales_share: float = 0.65
     firm_restart_package_multiplier: float = 0.1
     firm_restart_wealth_threshold: float = 1.0
     firm_restart_min_scale: float = 0.01
     firm_restart_max_scale: float = 3.0
-    employment_contract_periods: int = 6
+    employment_contract_periods: int = 12
+    essential_protection_periods: int = 24
+    startup_essential_supply_buffer: float = 1.35
+    startup_clothing_supply_multiplier: float = 2.0
     essential_productivity_multiplier: float = 1.00
     nonessential_productivity_multiplier: float = 1.08
     essential_technology_multiplier: float = 1.18
     nonessential_technology_multiplier: float = 1.08
     nonessential_demand_multiplier: float = 0.30
+    extra_essential_coverage_cap: float = 1.10
     technology_investment_share_min: float = 0.10
     technology_investment_share_max: float = 0.35
     technology_gain_min: float = 0.02
@@ -346,6 +385,14 @@ class SimulationConfig:
     senior_age_years: float = 70.0
     retirement_age_years: float = 80.0
     max_age_years: float = 85.0
+    school_age_min_years: float = 6.0
+    school_age_max_years: float = 18.0
+    university_age_min_years: float = 18.0
+    university_age_max_years: float = 30.0
+    school_years_required: float = 12.0
+    university_years_required: float = 4.0
+    initial_school_completion_share: float = 0.88
+    initial_university_completion_share: float = 0.25
     startup_grace_periods: int = 2
     firm_learning_warmup_periods: int = 18
     birth_interval_periods: int = 9
@@ -428,9 +475,22 @@ class SimulationConfig:
     government_child_allowance_share: float = 0.10
     government_basic_support_gap_share: float = 0.35
     government_procurement_gap_share: float = 0.30
+    public_school_budget_share: float = 0.015
+    public_university_budget_share: float = 0.015
     government_procurement_price_sensitivity: float = 0.85
     government_spending_scale: float = 1.00
     government_spending_efficiency: float = 0.95
+    government_countercyclical_enabled: bool = True
+    government_recession_unemployment_buffer: float = 0.03
+    government_recession_output_gap_threshold: float = 0.05
+    government_recession_lookback_periods: int = 3
+    government_countercyclical_transfer_weight: float = 0.70
+    government_countercyclical_procurement_weight: float = 0.85
+    government_countercyclical_support_multiplier_max: float = 2.00
+    government_countercyclical_procurement_multiplier_max: float = 2.40
+    initial_private_school_firms: int = 10
+    initial_private_university_firms: int = 1
+    track_firm_history: bool = False
 
 
 @dataclass
@@ -471,8 +531,11 @@ class PeriodSnapshot:
     potential_demand_units: float
     demand_fulfillment_rate: float
     essential_demand_units: float
+    essential_production_units: float
     essential_sales_units: float
     essential_fulfillment_rate: float
+    people_full_essential_coverage: int
+    full_essential_coverage_share: float
     average_food_meals_per_person: float
     food_sufficient_share: float
     food_subsistence_share: float
@@ -480,9 +543,37 @@ class PeriodSnapshot:
     food_severe_hunger_share: float
     average_health_fragility: float
     average_perceived_utility: float
+    school_age_population: int
+    university_age_population: int
+    school_students: int
+    university_students: int
+    school_enrollment_share: float
+    university_enrollment_share: float
+    school_completion_share: float
+    university_completion_share: float
+    school_labor_share: float
+    skilled_labor_share: float
+    low_resource_school_enrollment_share: float
+    low_resource_university_enrollment_share: float
+    low_resource_university_student_share: float
+    school_income_premium: float
+    university_income_premium: float
+    poverty_rate_without_university: float
+    poverty_rate_with_university: float
+    tracked_origin_adults: int
+    low_resource_origin_adults: int
+    low_resource_origin_upward_mobility_share: float
+    low_resource_origin_university_completion_share: float
+    low_resource_origin_university_upward_mobility_share: float
+    low_resource_origin_nonuniversity_upward_mobility_share: float
+    skilled_job_demand_share: float
+    skilled_job_fill_rate: float
+    skilled_labor_supply_to_demand_ratio: float
     total_sales_revenue: float
     total_production_units: float
     period_investment_spending: float
+    startup_fixed_capital_formation: float
+    startup_inventory_investment: float
     business_cost_recycled: float
     business_cost_to_firms: float
     business_cost_to_households: float
@@ -495,6 +586,8 @@ class PeriodSnapshot:
     total_inventory_units: float
     total_profit: float
     active_firms: int
+    active_school_firms: int
+    active_university_firms: int
     bankruptcies: int
     births: int
     deaths: int
@@ -531,9 +624,29 @@ class PeriodSnapshot:
     government_child_allowance: float
     government_basic_support: float
     government_procurement_spending: float
+    government_education_spending: float
+    government_school_spending: float
+    government_university_spending: float
     government_bond_issuance: float
     government_deficit: float
     government_surplus: float
+    recession_flag: float
+    recession_intensity: float
+    government_countercyclical_support_multiplier: float
+    government_countercyclical_procurement_multiplier: float
+    government_countercyclical_spending: float
+    total_inventory_book_value: float
+    household_final_consumption: float
+    government_final_consumption: float
+    gross_fixed_capital_formation: float
+    change_in_inventories: float
+    valuables_acquisition: float
+    gross_capital_formation: float
+    exports: float
+    imports: float
+    net_exports: float
+    gdp_expenditure_sna: float
+    gdp_expenditure_gap: float
     labor_share_gdp: float
     profit_share_gdp: float
     investment_share_gdp: float

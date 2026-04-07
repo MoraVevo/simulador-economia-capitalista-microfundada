@@ -8,13 +8,18 @@ version = "0.1.0"
 description = "Agent-based capitalist economy simulator"
 requires-python = ">=3.10"
 dependencies = [
+    "matplotlib",
+    "numba",
+    "numpy",
     "pandas",
     "plotly",
+    "reportlab",
     "streamlit",
 ]
 
 [project.scripts]
 economy-sim = "economy_simulator.cli:main"
+economy-sim-report = "economy_simulator.batch_reports:main"
 
 [tool.setuptools]
 packages = ["economy_simulator"]
