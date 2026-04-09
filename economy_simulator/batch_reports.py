@@ -135,6 +135,8 @@ def _annualize_core_history(monthly: pd.DataFrame) -> pd.DataFrame:
         "central_bank_target_money_supply": "last",
         "central_bank_policy_rate": "mean",
         "central_bank_issuance": "sum",
+        "central_bank_monetary_gap_share": "mean",
+        "average_bank_reserve_ratio": "mean",
         "government_tax_revenue": "sum",
         "government_total_spending": "sum",
         "government_deficit": "sum",
@@ -339,6 +341,8 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ("central_bank_target_money_supply", "Oferta objetivo"),
         ("central_bank_issuance", "Emision"),
         ("central_bank_policy_rate", "Tasa lider"),
+        ("central_bank_monetary_gap_share", "Brecha monetaria"),
+        ("average_bank_reserve_ratio", "Encaje efectivo"),
     ]:
         if column in annual.columns:
             ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)

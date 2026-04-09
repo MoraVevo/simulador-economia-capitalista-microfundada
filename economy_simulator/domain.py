@@ -84,11 +84,11 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         name="School / basic education",
         base_price=13.5,
         base_wage=9.1,
-        base_productivity=0.84,
-        household_demand_share=0.08,
+        base_productivity=0.88,
+        household_demand_share=0.10,
         essential_need=0.0,
-        discretionary_weight=0.58,
-        target_inventory_ratio=0.08,
+        discretionary_weight=0.82,
+        target_inventory_ratio=0.12,
         markup=0.18,
     ),
     SectorSpec(
@@ -96,11 +96,11 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         name="University / advanced education",
         base_price=18.5,
         base_wage=11.2,
-        base_productivity=0.80,
-        household_demand_share=0.07,
+        base_productivity=0.84,
+        household_demand_share=0.08,
         essential_need=0.0,
-        discretionary_weight=0.66,
-        target_inventory_ratio=0.07,
+        discretionary_weight=0.90,
+        target_inventory_ratio=0.10,
         markup=0.20,
     ),
 )
@@ -124,13 +124,21 @@ class Household:
     need_scale: float
     sector_preference_weights: dict[str, float]
     age_periods: int
+    partnership_affinity_code: int = 0
+    next_partnership_attempt_period: int = 0
+    fertility_multiplier: float = 1.0
     essential_shares: dict[str, float] = field(default_factory=dict)
     discretionary_shares: dict[str, float] = field(default_factory=dict)
     bank_id: int = 0
     loan_balance: float = 0.0
+    loan_delinquency_periods: int = 0
+    loan_restructure_count: int = 0
+    loan_restructure_grace_periods: int = 0
+    credit_exclusion_periods: int = 0
     employed_by: Optional[int] = None
     guardian_id: Optional[int] = None
     partner_id: Optional[int] = None
+    partnership_start_period: int = -999
     mother_id: Optional[int] = None
     father_id: Optional[int] = None
     children_count: int = 0
@@ -241,6 +249,7 @@ class Firm:
     input_cost_exempt: bool = False
     transport_cost_per_unit: float = 0.0
     fixed_overhead: float = 0.0
+    education_level_span: float = 0.0
     markup_tolerance: float = 1.0
     volume_preference: float = 1.0
     inventory_aversion: float = 1.0
@@ -275,7 +284,13 @@ class Firm:
     forecast_error_belief: float = 0.15
     last_technology_investment: float = 0.0
     last_technology_gain: float = 0.0
+    last_interest_cost: float = 0.0
     loan_balance: float = 0.0
+    loan_delinquency_periods: int = 0
+    loan_restructure_count: int = 0
+    loan_restructure_grace_periods: int = 0
+    credit_exclusion_periods: int = 0
+    loan_default_flag: bool = False
     bankruptcy_streak: int = 0
     loss_streak: int = 0
 
@@ -389,13 +404,32 @@ class SimulationConfig:
     school_age_max_years: float = 18.0
     university_age_min_years: float = 18.0
     university_age_max_years: float = 30.0
+    adult_school_catchup_age_max_years: float = 30.0
+    adult_university_catchup_age_max_years: float = 40.0
     school_years_required: float = 12.0
     university_years_required: float = 4.0
+    school_students_per_classroom: float = 26.0
+    university_students_per_classroom: float = 18.0
+    school_classroom_capital_cost: float = 6.0
+    university_classroom_capital_cost: float = 10.0
+    school_support_staff_ratio: float = 0.32
+    university_support_staff_ratio: float = 0.45
     initial_school_completion_share: float = 0.88
     initial_university_completion_share: float = 0.25
     startup_grace_periods: int = 2
     firm_learning_warmup_periods: int = 18
     birth_interval_periods: int = 9
+    partnership_affinity_buckets: int = 20
+    partnership_base_match_probability: float = 0.08
+    partnership_retry_periods: int = 4
+    partnership_age_gap_neutral_years: float = 5.0
+    partnership_age_gap_soft_cap_years: float = 10.0
+    partnership_age_gap_soft_penalty: float = 0.80
+    partnership_age_gap_hard_penalty: float = 0.06
+    birth_capable_resource_ratio_min: float = 1.35
+    partnered_birth_ramp_years: float = 5.0
+    partnered_birth_ramp_floor: float = 0.30
+    fertility_heterogeneity_max: float = 0.20
     annual_birth_rate: float = 0.15
     annual_birth_rate_capable_single: float = 0.10
     annual_birth_rate_capable_partnered: float = 0.50
@@ -435,6 +469,13 @@ class SimulationConfig:
     central_bank_target_annual_inflation: float = 0.04
     central_bank_max_issue_share: float = 0.05
     central_bank_goods_growth_pass_through: float = 1.0
+    central_bank_monetary_gap_rate_weight: float = 0.20
+    central_bank_omo_response_share: float = 0.60
+    central_bank_dynamic_reserve_ratio_enabled: bool = True
+    central_bank_reserve_ratio_floor: float = 0.08
+    central_bank_reserve_ratio_ceiling: float = 0.30
+    central_bank_reserve_ratio_gap_sensitivity: float = 0.08
+    central_bank_reserve_ratio_adjustment_speed: float = 0.35
     central_bank_policy_rate_base: float = 0.02
     central_bank_policy_rate_floor: float = 0.00
     central_bank_policy_rate_ceiling: float = 0.12
@@ -451,13 +492,29 @@ class SimulationConfig:
     bank_household_max_interest_share: float = 0.35
     bank_firm_min_interest_coverage: float = 1.15
     bank_firm_max_debt_to_revenue: float = 6.0
+    household_loan_principal_payment_share: float = 0.015
+    household_debt_service_protected_basket_share: float = 0.65
+    household_default_protected_basket_share: float = 0.35
+    household_loan_restructure_delinquency: int = 3
+    household_loan_default_delinquency: int = 6
+    household_loan_restructure_grace_periods: int = 6
+    household_loan_restructure_haircut_share: float = 0.08
+    household_default_credit_cooldown_periods: int = 18
+    firm_loan_principal_payment_share: float = 0.02
+    firm_debt_service_operating_buffer_share: float = 0.45
+    firm_loan_restructure_delinquency: int = 2
+    firm_loan_default_delinquency: int = 4
+    firm_loan_restructure_grace_periods: int = 4
+    firm_loan_restructure_haircut_share: float = 0.10
+    firm_default_credit_cooldown_periods: int = 24
     central_bank_discount_window_spread: float = 0.05
     entrepreneur_consumption_share: float = 0.20
     entrepreneur_vault_share: float = 0.02
-    reservation_wage_adjustment_speed: float = 0.85
-    reservation_wage_floor_share: float = 1.00
-    living_wage_bargaining_weight: float = 0.45
-    essential_wage_bargaining_bonus: float = 0.20
+    reservation_wage_adjustment_speed: float = 0.45
+    reservation_wage_floor_share: float = 0.90
+    living_wage_bargaining_weight: float = 0.28
+    essential_wage_bargaining_bonus: float = 0.10
+    firm_costing_scale_floor_share: float = 0.55
     government_enabled: bool = True
     government_corporate_tax_rate_low: float = 0.10
     government_corporate_tax_rate_mid: float = 0.18
@@ -477,6 +534,10 @@ class SimulationConfig:
     government_procurement_gap_share: float = 0.30
     public_school_budget_share: float = 0.015
     public_university_budget_share: float = 0.015
+    public_school_min_target_units: float = 0.65
+    public_university_min_target_units: float = 0.32
+    adult_school_catchup_target_units: float = 0.30
+    adult_university_catchup_target_units: float = 0.20
     government_procurement_price_sensitivity: float = 0.85
     government_spending_scale: float = 1.00
     government_spending_efficiency: float = 0.95
@@ -527,6 +588,7 @@ class PeriodSnapshot:
     families_income_below_basket_share: float
     families_resources_below_basket_share: float
     total_wages: float
+    median_wage: float
     total_sales_units: float
     potential_demand_units: float
     demand_fulfillment_rate: float
@@ -545,8 +607,8 @@ class PeriodSnapshot:
     average_perceived_utility: float
     school_age_population: int
     university_age_population: int
-    school_students: int
-    university_students: int
+    school_students: float
+    university_students: float
     school_enrollment_share: float
     university_enrollment_share: float
     school_completion_share: float
@@ -659,6 +721,8 @@ class PeriodSnapshot:
     central_bank_policy_rate: float
     central_bank_issuance: float
     cumulative_central_bank_issuance: float
+    central_bank_monetary_gap_share: float
+    average_bank_reserve_ratio: float
     household_credit_creation: float
     firm_credit_creation: float
     commercial_bank_credit_creation: float
@@ -668,10 +732,19 @@ class PeriodSnapshot:
     total_bank_reserves: float
     total_bank_loans_households: float
     total_bank_loans_firms: float
+    household_delinquent_loans: float
+    firm_delinquent_loans: float
+    bank_nonperforming_loans: float
     total_bank_bond_holdings: float
     total_bank_assets: float
     total_bank_liabilities: float
     bank_equity: float
+    bank_writeoffs: float
+    bank_loan_restructures: int
+    household_loan_defaults: int
+    firm_loan_defaults: int
+    household_loan_restructures: int
+    firm_loan_restructures: int
     bank_recapitalization: float
     bank_resolution_events: int
     bank_undercapitalized_share: float

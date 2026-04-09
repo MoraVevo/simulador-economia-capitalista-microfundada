@@ -349,9 +349,81 @@ class MoneyFlowTests(unittest.TestCase):
             family_remaining_cash=140.0,
             family_basic_basket_cost=100.0,
         )
+        comfortable_school = sim._discretionary_sector_utility_weight(
+            "school",
+            1.0,
+            essential_coverage=1.25,
+            family_remaining_cash=140.0,
+            family_basic_basket_cost=100.0,
+        )
+        comfortable_university = sim._discretionary_sector_utility_weight(
+            "university",
+            1.0,
+            essential_coverage=1.25,
+            family_remaining_cash=140.0,
+            family_basic_basket_cost=100.0,
+        )
 
         self.assertGreater(comfortable_leisure, stressed_leisure)
+        self.assertGreater(comfortable_school, comfortable_leisure)
+        self.assertGreater(comfortable_university, comfortable_school)
         self.assertGreater(comfortable_leisure, comfortable_manufactured)
+
+    def test_school_market_factor_starts_before_full_affluence(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=40)
+        )
+
+        school_age = next(h for h in sim.households if h.alive and sim._is_school_age(h))
+        school_age.savings = sim._essential_budget(school_age) * 0.35
+        sim._period_family_resource_coverage_cache = {school_age.id: 0.35}
+
+        market_factor = sim._household_education_market_factor(school_age, advanced=False)
+
+        self.assertGreater(market_factor, 0.0)
+
+    def test_private_school_startup_price_comes_from_service_cost(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=2, seed=92)
+        )
+
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "school")
+        spec = SECTOR_BY_KEY["school"]
+
+        self.assertGreater(firm.education_level_span, 0.0)
+        self.assertGreater(sim._education_firm_capacity(firm), 0.0)
+        self.assertAlmostEqual(firm.price, firm.last_unit_cost * (1.0 + spec.markup), places=6)
+
+    def test_school_service_capacity_limits_production_and_resets_inventory(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=220, firms_per_sector=2, seed=93)
+        )
+
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "school")
+        for worker_id in list(firm.workers):
+            sim._release_household_from_employment(sim.households[worker_id])
+        firm.workers.clear()
+
+        replacement_workers = [
+            household
+            for household in sim.households
+            if household.alive and sim._household_age_years(household) >= sim.config.entry_age_years
+        ][:8]
+        for household in replacement_workers:
+            sim._release_household_from_employment(household)
+            household.employed_by = firm.id
+            firm.workers.append(household.id)
+
+        firm.cash = max(firm.cash, 500.0)
+        firm.capital = sim.config.school_classroom_capital_cost
+        firm.education_level_span = sim.config.school_years_required
+        firm.inventory = 999.0
+        capacity = sim._education_firm_capacity(firm)
+
+        sim._produce_and_pay_wages()
+
+        self.assertLessEqual(firm.last_production, capacity + 1e-9)
+        self.assertAlmostEqual(firm.inventory, firm.last_production, places=6)
 
     def test_extra_essential_gap_units_caps_top_up_near_target(self) -> None:
         sim = EconomySimulation(
@@ -531,6 +603,9 @@ class MoneyFlowTests(unittest.TestCase):
         older_adult.school_years_completed = sim.config.school_years_required
         older_adult.university_years_completed = 0.0
         older_adult.higher_education_affinity = 0.99
+        young_adult.savings = 500.0
+        older_adult.savings = 500.0
+        sim._period_family_resource_coverage_cache.clear()
 
         self.assertGreater(sim._household_sector_desired_units(school_age, "school"), 0.0)
         self.assertEqual(sim._household_sector_desired_units(school_age, "university"), 0.0)
@@ -1298,7 +1373,15 @@ class MoneyFlowTests(unittest.TestCase):
 
     def test_refresh_family_links_matches_each_female_once_in_greedy_order(self) -> None:
         sim = EconomySimulation(
-            SimulationConfig(periods=1, households=80, firms_per_sector=2, seed=81)
+            SimulationConfig(
+                periods=1,
+                households=80,
+                firms_per_sector=2,
+                seed=81,
+                partnership_base_match_probability=1.0,
+                partnership_age_gap_hard_penalty=1.0,
+                partnership_age_gap_soft_penalty=0.0,
+            )
         )
         males = [
             household
@@ -1333,6 +1416,8 @@ class MoneyFlowTests(unittest.TestCase):
         for household in (male_1, male_2, female_1, female_2):
             household.savings = 100.0
             household.desired_children = 2
+            household.partnership_affinity_code = 7
+            household.next_partnership_attempt_period = 0
 
         sim._refresh_period_household_caches()
         sim._refresh_family_links()
@@ -1386,6 +1471,8 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertIn("bank_recapitalization", frame.columns)
         self.assertIn("bank_resolution_events", frame.columns)
         self.assertIn("bank_undercapitalized_share", frame.columns)
+        self.assertIn("bank_writeoffs", frame.columns)
+        self.assertIn("bank_nonperforming_loan_share", frame.columns)
         self.assertIn("gdp_expenditure_sna", frame.columns)
         self.assertIn("gdp_expenditure_gap", frame.columns)
         self.assertIn("commercial_bank_credit_creation", frame.columns)
@@ -1539,6 +1626,46 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertFalse(sim._household_creditworthy(borrower, 100.0, bank))
 
+    def test_household_default_writes_off_loan_and_blocks_new_credit(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=120,
+                firms_per_sector=2,
+                seed=89,
+                household_loan_restructure_delinquency=3,
+                household_loan_default_delinquency=2,
+            )
+        )
+        borrower = next(
+            household
+            for household in sim.households
+            if household.alive and sim._household_age_years(household) >= sim.config.entry_age_years
+        )
+        borrower.partner_id = None
+        borrower.guardian_id = None
+        borrower.mother_id = None
+        borrower.father_id = None
+        borrower.savings = 0.0
+        borrower.wage_income = 0.0
+        borrower.loan_balance = 120.0
+        borrower.loan_restructure_count = 1
+        borrower.loan_delinquency_periods = 1
+        borrower.last_income = 0.0
+        borrower.employed_by = None
+
+        sim._refresh_period_household_caches()
+        sim._refresh_family_links()
+        sim._refresh_period_family_cache()
+        sim._service_household_loans()
+
+        self.assertEqual(borrower.loan_balance, 0.0)
+        self.assertEqual(sim._period_household_loan_defaults, 1)
+        self.assertGreater(sim._period_bank_writeoffs, 0.0)
+        self.assertGreater(borrower.credit_exclusion_periods, 0)
+        bank = sim.banks[sim._bank_id_for_household(borrower)]
+        self.assertFalse(sim._household_creditworthy(borrower, 10.0, bank))
+
     def test_nonessential_speculative_firm_credit_is_denied_after_repeated_missed_sales(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=88)
@@ -1560,6 +1687,26 @@ class MoneyFlowTests(unittest.TestCase):
         firm.loan_balance = 100.0
 
         self.assertFalse(sim._firm_creditworthy(firm, 250.0, bank))
+
+    def test_firm_default_is_resolved_before_owner_extracts_residual_cash(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=160, firms_per_sector=2, seed=90, replacement_enabled=False)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "manufactured")
+        owner = sim.entrepreneurs[firm.owner_id]
+        owner_wealth_before = owner.wealth
+        firm.cash = 50.0
+        firm.loan_balance = 200.0
+        firm.loan_default_flag = True
+        firm.age = sim.config.bankruptcy_grace_period
+
+        sim._resolve_bankruptcy_and_entry()
+
+        self.assertFalse(firm.active)
+        self.assertEqual(firm.loan_balance, 0.0)
+        self.assertEqual(sim._period_firm_loan_defaults, 1)
+        self.assertGreaterEqual(sim._period_bank_writeoffs, 150.0)
+        self.assertAlmostEqual(owner.wealth, owner_wealth_before, places=6)
 
     def test_history_frame_derives_augmented_class_shares_and_fiscal_burdens(self) -> None:
         sim = EconomySimulation(
@@ -1705,12 +1852,35 @@ class MoneyFlowTests(unittest.TestCase):
         snapshot = sim.step()
 
         self.assertGreater(snapshot.central_bank_issuance, 0.0)
-        self.assertAlmostEqual(
+        self.assertLessEqual(
             snapshot.total_liquid_money,
-            initial_liquid_money + snapshot.commercial_bank_credit_creation,
-            places=6,
+            initial_liquid_money + snapshot.commercial_bank_credit_creation + 1e-6,
         )
         self.assertAlmostEqual(snapshot.central_bank_money_supply, snapshot.total_liquid_money, places=6)
+
+    def test_fisher_policy_uses_bank_channel_before_broad_money_changes(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=300,
+                firms_per_sector=4,
+                seed=59,
+                central_bank_enabled=True,
+                government_enabled=False,
+                central_bank_rule="fisher",
+                central_bank_target_velocity=0.12,
+                central_bank_max_issue_share=0.05,
+            )
+        )
+        initial_liquid_money = sim._current_total_liquid_money()
+        initial_average_reserve_ratio = sum(bank.reserve_ratio for bank in sim.banks) / max(1, len(sim.banks))
+
+        sim._apply_central_bank_policy()
+
+        self.assertNotEqual(sim.central_bank.issuance_this_period, 0.0)
+        self.assertAlmostEqual(sim.central_bank.money_supply, initial_liquid_money, places=6)
+        average_reserve_ratio = sum(bank.reserve_ratio for bank in sim.banks) / max(1, len(sim.banks))
+        self.assertNotEqual(average_reserve_ratio, initial_average_reserve_ratio)
 
     def test_productivity_dividend_issues_to_workers_of_more_productive_firm(self) -> None:
         sim = EconomySimulation(
@@ -2022,7 +2192,7 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertEqual(child.mother_id, mother.id)
         self.assertIsNone(child.father_id)
 
-    def test_stable_family_increases_desired_children_over_time(self) -> None:
+    def test_stable_family_does_not_auto_increase_desired_children_over_time(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(
                 periods=1,
@@ -2054,8 +2224,8 @@ class MoneyFlowTests(unittest.TestCase):
             family_remaining_cash=500.0,
         )
 
-        self.assertEqual(mother.desired_children, 2)
-        self.assertLess(mother.child_desire_pressure, 1.0)
+        self.assertEqual(mother.desired_children, 1)
+        self.assertEqual(mother.child_desire_pressure, 0.95)
 
     def test_fertile_capable_women_metric_excludes_mothers_inside_birth_interval(self) -> None:
         sim = EconomySimulation(
