@@ -26,9 +26,12 @@ from .domain import (
 )
 from .metrics import clamp, gini
 
-QUALIFIED_SECTOR_KEYS = ("manufactured", "leisure", "school", "university")
+PUBLIC_ADMINISTRATION_EMPLOYER_ID = -1
+QUALIFIED_SECTOR_KEYS = ("manufactured", "leisure", "school", "university", "public_administration")
 ARRAY_BACKED_SECTOR_KEYS = ("food", "housing", "clothing", "manufactured", "leisure")
 ARRAY_BACKED_SECTOR_INDEX = {sector_key: index for index, sector_key in enumerate(ARRAY_BACKED_SECTOR_KEYS)}
+MERIT_SECTOR_KEYS = ("school", "university")
+PURE_DISCRETIONARY_SECTOR_KEYS = ("manufactured", "leisure")
 
 
 class EconomySimulation:
@@ -57,6 +60,8 @@ class EconomySimulation:
         self._period_living_wage_anchor_cache: float | None = None
         self.history: list[PeriodSnapshot] = []
         self.firm_history: list[FirmPeriodSnapshot] = []
+        self._sector_sales_history = {spec.key: [] for spec in SECTOR_SPECS}
+        self._sector_revealed_unmet_history = {spec.key: [] for spec in SECTOR_SPECS}
         self.households = self._build_households()
         self._initialize_household_education()
         self._startup_structural_demand_cache = self._compute_structural_demand_map(
@@ -134,9 +139,12 @@ class EconomySimulation:
         self._period_worker_involuntary_retained = 0.0
         self._period_household_credit_issued = 0.0
         self._period_firm_credit_issued = 0.0
+        self._period_firm_expansion_credit_issued = 0.0
         self._period_entrepreneur_spending = 0.0
         self._period_dividends_paid = 0.0
         self._period_government_tax_revenue = 0.0
+        self._period_government_labor_tax_revenue = 0.0
+        self._period_government_payroll_tax_revenue = 0.0
         self._period_government_corporate_tax_revenue = 0.0
         self._period_government_dividend_tax_revenue = 0.0
         self._period_government_wealth_tax_revenue = 0.0
@@ -148,6 +156,11 @@ class EconomySimulation:
         self._period_government_education_spending = 0.0
         self._period_government_school_spending = 0.0
         self._period_government_university_spending = 0.0
+        self._period_government_school_units = 0.0
+        self._period_government_university_units = 0.0
+        self._period_government_public_administration_spending = 0.0
+        self._period_government_infrastructure_spending = 0.0
+        self._period_government_public_capital_formation = 0.0
         self._period_government_bond_issuance = 0.0
         self._period_government_deficit = 0.0
         self._period_government_surplus = 0.0
@@ -173,9 +186,13 @@ class EconomySimulation:
         self._last_sector_sales_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._prior_sector_sales_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._last_sector_budget_demand_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
+        self._last_sector_revealed_unmet_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
+        self._sector_sales_history = {spec.key: [] for spec in SECTOR_SPECS}
+        self._sector_revealed_unmet_history = {spec.key: [] for spec in SECTOR_SPECS}
         self._period_sector_potential_demand_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._period_sector_sales_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._period_sector_budget_demand_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
+        self._period_sector_revealed_unmet_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
 
     def run(self) -> SimulationResult:
         while self.period < self.config.periods:
@@ -215,11 +232,13 @@ class EconomySimulation:
         self._accrue_bank_funding_costs()
         self._stabilize_bank_capital_positions()
         self._apply_bank_credit_policy()
+        self._manage_public_administration_workforce()
         self._produce_and_pay_wages()
         self._apply_government_household_support()
         self._service_household_loans()
         self._consume_households()
         self._apply_government_essential_procurement()
+        self._apply_government_infrastructure_investment()
         self._settle_firms()
         self._finalize_government_period()
         self._resolve_bankruptcy_and_entry()
@@ -267,9 +286,12 @@ class EconomySimulation:
         self._period_worker_involuntary_retained = 0.0
         self._period_household_credit_issued = 0.0
         self._period_firm_credit_issued = 0.0
+        self._period_firm_expansion_credit_issued = 0.0
         self._period_entrepreneur_spending = 0.0
         self._period_dividends_paid = 0.0
         self._period_government_tax_revenue = 0.0
+        self._period_government_labor_tax_revenue = 0.0
+        self._period_government_payroll_tax_revenue = 0.0
         self._period_government_corporate_tax_revenue = 0.0
         self._period_government_dividend_tax_revenue = 0.0
         self._period_government_wealth_tax_revenue = 0.0
@@ -281,6 +303,11 @@ class EconomySimulation:
         self._period_government_education_spending = 0.0
         self._period_government_school_spending = 0.0
         self._period_government_university_spending = 0.0
+        self._period_government_school_units = 0.0
+        self._period_government_university_units = 0.0
+        self._period_government_public_administration_spending = 0.0
+        self._period_government_infrastructure_spending = 0.0
+        self._period_government_public_capital_formation = 0.0
         self._period_government_bond_issuance = 0.0
         self._period_government_deficit = 0.0
         self._period_government_surplus = 0.0
@@ -305,9 +332,12 @@ class EconomySimulation:
         self._period_sector_potential_demand_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._period_sector_sales_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._period_sector_budget_demand_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
+        self._period_sector_revealed_unmet_units = {spec.key: 0.0 for spec in SECTOR_SPECS}
         self._period_household_desired_units_cache = {}
         self._period_essential_budget_cache = {}
         self.government.tax_revenue_this_period = 0.0
+        self.government.labor_tax_revenue = 0.0
+        self.government.payroll_tax_revenue = 0.0
         self.government.corporate_tax_revenue = 0.0
         self.government.dividend_tax_revenue = 0.0
         self.government.wealth_tax_revenue = 0.0
@@ -319,6 +349,8 @@ class EconomySimulation:
         self.government.education_spending_this_period = 0.0
         self.government.school_public_spending_this_period = 0.0
         self.government.university_public_spending_this_period = 0.0
+        self.government.public_administration_spending_this_period = 0.0
+        self.government.infrastructure_spending_this_period = 0.0
         self.government.bond_issuance_this_period = 0.0
         self.government.deficit_this_period = 0.0
         self.government.surplus_this_period = 0.0
@@ -327,6 +359,10 @@ class EconomySimulation:
             bank.interest_expense = 0.0
             bank.profits = 0.0
         for firm in self.firms:
+            firm.last_labor_offer_rejections = firm.labor_offer_rejections
+            firm.last_labor_offer_rejection_wage_floor = firm.labor_offer_rejection_wage_floor
+            firm.labor_offer_rejections = 0
+            firm.labor_offer_rejection_wage_floor = 0.0
             firm.sales_this_period = 0.0
             firm.last_technology_investment = 0.0
             firm.last_technology_gain = 0.0
@@ -429,10 +465,91 @@ class EconomySimulation:
     def _reset_household_labor_state(self) -> None:
         for household in self.households:
             household.wage_income = 0.0
+            household.previous_income = household.last_income
             household.last_income = 0.0
             household.last_available_cash = 0.0
             household.last_consumption = {spec.key: 0.0 for spec in SECTOR_SPECS}
             household.last_perceived_utility = 0.0
+
+    def _household_observed_income(self, household: Household) -> float:
+        return max(0.0, household.previous_income, household.last_income)
+
+    def _public_administration_base_wage_offer(self) -> float:
+        living_wage_anchor = self._living_wage_anchor()
+        premium = max(0.0, self.config.public_administration_wage_premium)
+        return max(
+            SECTOR_BY_KEY["public_administration"].base_wage,
+            living_wage_anchor * (self.config.reservation_wage_floor_share + premium),
+        )
+
+    def _recent_nominal_gdp_anchor(self) -> float:
+        lookback = max(1, int(self.config.periods_per_year))
+        recent_gdp = [
+            max(0.0, getattr(snapshot, "gdp_nominal", 0.0))
+            for snapshot in self.history[-lookback:]
+            if getattr(snapshot, "gdp_nominal", 0.0) > 0.0
+        ]
+        if recent_gdp:
+            return sum(recent_gdp) / len(recent_gdp)
+        labor_force = sum(
+            1
+            for household in self._active_households()
+            if self._household_labor_capacity(household) > 0.0
+        )
+        synthetic_gdp = self._living_wage_anchor() * max(1, labor_force) * 1.6
+        return max(1.0, synthetic_gdp, self._period_sales_revenue)
+
+    def _public_administration_state_size_share_gdp(self) -> float:
+        recent_gdp = self._recent_nominal_gdp_anchor()
+        if recent_gdp <= 0.0:
+            return 0.0
+        return self._government_structural_budget_anchor() / recent_gdp
+
+    def _public_administration_employment_target_share(self) -> float:
+        floor_share = clamp(self.config.public_administration_employment_floor_share, 0.0, 0.25)
+        sensitivity = max(0.0, self.config.public_administration_employment_state_size_sensitivity)
+        cap_share = clamp(self.config.public_administration_employment_cap_share, floor_share, 0.50)
+        state_size_share = max(0.0, self._public_administration_state_size_share_gdp())
+        return clamp(floor_share + sensitivity * state_size_share, floor_share, cap_share)
+
+    def _public_administration_payroll_budget(self) -> float:
+        return max(0.0, self.config.public_administration_payroll_share) * self._public_administration_budget()
+
+    def _public_administration_target_workers(self) -> int:
+        labor_force = len(
+            [
+                household
+                for household in self._active_households()
+                if self._household_labor_capacity(household) > 0.0
+            ]
+        )
+        if labor_force <= 0:
+            return 0
+        return max(
+            0,
+            int(round(labor_force * self._public_administration_employment_target_share())),
+        )
+
+    def _public_administration_wage_offer(self) -> float:
+        target_workers = self._public_administration_target_workers()
+        base_wage = self._public_administration_base_wage_offer()
+        if target_workers <= 0:
+            return base_wage
+        payroll_budget = self._public_administration_payroll_budget()
+        affordability_wage = payroll_budget / max(1, target_workers)
+        wage_floor = max(SECTOR_BY_KEY["public_administration"].base_wage, 0.72 * base_wage)
+        wage_ceiling = max(wage_floor, 1.15 * base_wage)
+        return clamp(max(SECTOR_BY_KEY["public_administration"].base_wage, affordability_wage), wage_floor, wage_ceiling)
+
+    def _current_employer_wage_offer(self, employer_id: int | None) -> float:
+        if employer_id is None:
+            return 0.0
+        if employer_id == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+            return self._public_administration_wage_offer()
+        firm = self.firm_by_id.get(employer_id)
+        if firm is None or not firm.active:
+            return 0.0
+        return max(0.0, firm.wage_offer)
 
     def _update_household_reservation_wages(self) -> None:
         living_wage_anchor = self._living_wage_anchor()
@@ -455,24 +572,62 @@ class EconomySimulation:
             employed_earners = sum(1 for member in earning_members if member.employed_by is not None)
             supporting_earners = employed_earners if employed_earners > 0 else len(earning_members)
             reproduction_wage = family_basket_cost / max(1, supporting_earners)
-            family_income = sum(member.last_income for member in members)
+            family_income = sum(self._household_observed_income(member) for member in members)
+            family_cash = sum(self._household_cash_balance(member) for member in members)
             income_cover = family_income / max(1e-9, family_basket_cost)
             family_stress = clamp(1.0 - income_cover, 0.0, 1.0)
+            liquidity_holdout_factor = self._family_reservation_liquidity_factor(
+                earning_members,
+                family_cash=family_cash,
+                family_basic_basket_cost=family_basket_cost,
+                family_stress=family_stress,
+            )
             reservation_target = max(
-                living_wage_anchor * floor_share,
-                reproduction_wage * (0.92 + 0.18 * family_stress),
+                living_wage_anchor * floor_share * liquidity_holdout_factor,
+                reproduction_wage * (0.92 + 0.18 * family_stress) * liquidity_holdout_factor,
             )
 
             for member in earning_members:
-                current_wage = 0.0
-                if member.employed_by is not None and member.employed_by in self.firm_by_id:
-                    current_wage = self.firm_by_id[member.employed_by].wage_offer
+                current_wage = self._current_employer_wage_offer(member.employed_by)
                 blended_target = (1.0 - adjustment_speed) * member.reservation_wage + adjustment_speed * reservation_target
                 member.reservation_wage = clamp(
                     max(current_wage * 0.92, blended_target),
                     0.0,
                     living_wage_anchor * 3.0,
                 )
+
+    def _family_reservation_liquidity_factor(
+        self,
+        earning_members: list[Household],
+        *,
+        family_cash: float,
+        family_basic_basket_cost: float,
+        family_stress: float,
+    ) -> float:
+        if family_basic_basket_cost <= 0.0 or not earning_members:
+            return 1.0
+        employment_stability = (
+            sum(1.0 for member in earning_members if member.employed_by is not None)
+            / max(1.0, len(earning_members))
+        )
+        family_money_trust = sum(member.money_trust for member in earning_members) / max(1, len(earning_members))
+        reference_cushion_months = max(0.5, self.config.reservation_wage_reference_cushion_months)
+        target_cushion_months = clamp(
+            reference_cushion_months
+            + 0.70 * (1.0 - employment_stability)
+            + 0.55 * (1.0 - family_money_trust)
+            + 0.45 * family_stress,
+            0.5,
+            6.0,
+        )
+        effective_target_cushion = family_basic_basket_cost * target_cushion_months
+        cushion_ratio = family_cash / max(1.0, effective_target_cushion)
+        shortage = clamp(1.0 - cushion_ratio, 0.0, 1.0)
+        surplus = clamp(cushion_ratio - 1.0, 0.0, 1.5)
+        discount_max = clamp(self.config.reservation_wage_liquidity_discount_max, 0.0, 0.45)
+        premium_max = clamp(self.config.reservation_wage_liquidity_premium_max, 0.0, 0.30)
+        factor = 1.0 - discount_max * shortage + premium_max * surplus
+        return clamp(factor, 0.60, 1.20)
 
     def _sector_wage_pressure_bonus(
         self,
@@ -501,6 +656,12 @@ class EconomySimulation:
                 + 0.04 * max(0.0, labor_tightness)
                 + 0.06 * max(0.0, living_wage_gap) * (0.60 + 0.40 * max(0.0, wage_room))
             )
+        if sector_key == "public_administration":
+            return (
+                0.06 * vacancy_ratio
+                + 0.02 * max(0.0, labor_tightness)
+                + 0.04 * max(0.0, living_wage_gap)
+            )
         return 0.0
 
     def _sector_wage_floor_premium(self, sector_key: str) -> float:
@@ -510,6 +671,8 @@ class EconomySimulation:
             return 0.08
         if sector_key == "university":
             return 0.16
+        if sector_key == "public_administration":
+            return max(0.0, self.config.public_administration_wage_premium)
         return 0.0
 
     def _sector_wage_floor(self, sector_key: str, living_wage_anchor: float | None = None) -> float:
@@ -527,6 +690,56 @@ class EconomySimulation:
 
     def _firm_hiring_capacity(self, firm: Firm) -> int:
         return max(0, firm.desired_workers)
+
+    def _record_labor_offer_rejection(self, firm: Firm, reservation_wage: float) -> None:
+        if reservation_wage <= firm.wage_offer:
+            return
+        firm.labor_offer_rejections += 1
+        if firm.labor_offer_rejection_wage_floor <= 0.0:
+            firm.labor_offer_rejection_wage_floor = reservation_wage
+        else:
+            firm.labor_offer_rejection_wage_floor = min(
+                firm.labor_offer_rejection_wage_floor,
+                reservation_wage,
+            )
+
+    def _profitable_labor_offer_rejection_wage_target(
+        self,
+        firm: Firm,
+        *,
+        baseline_demand: float,
+        effective_productivity: float,
+        target_workers: int,
+    ) -> float | None:
+        if firm.last_labor_offer_rejections <= 0:
+            return None
+        observed_rejection_wage = max(
+            firm.wage_offer,
+            firm.last_labor_offer_rejection_wage_floor,
+        )
+        if observed_rejection_wage <= firm.wage_offer:
+            return None
+        current_workers = max(0, firm.last_worker_count)
+        if target_workers <= current_workers:
+            return None
+        current_sales_capacity = firm.inventory + effective_productivity * current_workers
+        expected_sales_gap = max(0.0, baseline_demand - current_sales_capacity)
+        marginal_sales = min(effective_productivity, expected_sales_gap)
+        if marginal_sales <= 0.0:
+            return None
+        gross_margin_per_unit = max(
+            0.0,
+            firm.price - firm.input_cost_per_unit - firm.transport_cost_per_unit,
+        )
+        if gross_margin_per_unit <= 0.0:
+            return None
+        payroll_tax_rate = self._government_payroll_tax_rate()
+        max_profitable_wage = (
+            marginal_sales * gross_margin_per_unit / max(1e-9, 1.0 + payroll_tax_rate)
+        )
+        if max_profitable_wage + 1e-9 < observed_rejection_wage:
+            return None
+        return observed_rejection_wage
 
     def _best_available_wage_offer(
         self,
@@ -551,6 +764,16 @@ class EconomySimulation:
         active_households = self._active_households()
         for household in active_households:
             if household.employed_by is None:
+                continue
+            if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+                household.employment_tenure += 1
+                if household.employment_tenure >= contract_periods:
+                    best_wage = self._best_available_wage_offer(PUBLIC_ADMINISTRATION_EMPLOYER_ID)
+                    public_wage = self._public_administration_wage_offer()
+                    if best_wage is None or best_wage <= public_wage:
+                        household.employment_tenure = 0
+                        continue
+                    self._release_household_from_employment(household)
                 continue
             firm = self.firm_by_id.get(household.employed_by)
             if firm is None or not firm.active:
@@ -621,6 +844,18 @@ class EconomySimulation:
         self._last_sector_potential_demand_units = self._period_sector_potential_demand_units.copy()
         self._last_sector_sales_units = self._period_sector_sales_units.copy()
         self._last_sector_budget_demand_units = self._period_sector_budget_demand_units.copy()
+        self._last_sector_revealed_unmet_units = self._period_sector_revealed_unmet_units.copy()
+        history_window = self._recent_history_window()
+        for spec in SECTOR_SPECS:
+            sector_key = spec.key
+            self._sector_sales_history[sector_key].append(self._last_sector_sales_units.get(sector_key, 0.0))
+            self._sector_revealed_unmet_history[sector_key].append(
+                self._last_sector_revealed_unmet_units.get(sector_key, 0.0)
+            )
+            if len(self._sector_sales_history[sector_key]) > history_window:
+                del self._sector_sales_history[sector_key][:-history_window]
+            if len(self._sector_revealed_unmet_history[sector_key]) > history_window:
+                del self._sector_revealed_unmet_history[sector_key][:-history_window]
 
     def _sector_market_total(self, sector_key: str) -> float:
         firms = self._sector_firms(sector_key)
@@ -642,6 +877,7 @@ class EconomySimulation:
         if ranked_firms is None:
             ranked_firms = sorted(self._sector_firms(sector_key), key=lambda firm: firm.price)
         if not ranked_firms or desired_units <= 0.0 or cash <= 0.0:
+            self._record_revealed_unmet_demand(sector_key, desired_units, 0.0, cash)
             return cash, 0.0
 
         elasticity = 1.0 + 0.35 * price_sensitivity
@@ -654,6 +890,7 @@ class EconomySimulation:
             ranked_available_firms.append((firm, competitiveness))
 
         if not ranked_available_firms:
+            self._record_revealed_unmet_demand(sector_key, desired_units, 0.0, cash)
             return cash, 0.0
 
         bought_total = 0.0
@@ -674,9 +911,11 @@ class EconomySimulation:
             units_bought = min(target_units, affordable_units, firm.inventory)
             if units_bought <= 0.0:
                 continue
+            units_bought = self._remove_inventory_units(firm, units_bought)
+            if units_bought <= 0.0:
+                continue
             spend = units_bought * firm.price
             cash -= spend
-            firm.inventory -= units_bought
             firm.cash += spend
             firm.sales_this_period += units_bought
             self._period_sales_units += units_bought
@@ -686,7 +925,24 @@ class EconomySimulation:
             bought_total += units_bought
             remaining_desired_units -= units_bought
 
+        self._record_revealed_unmet_demand(sector_key, desired_units, bought_total, cash)
         return cash, bought_total
+
+    def _record_revealed_unmet_demand(
+        self,
+        sector_key: str,
+        desired_units: float,
+        bought_units: float,
+        residual_cash: float,
+    ) -> None:
+        if desired_units <= bought_units or residual_cash <= 1e-9:
+            return
+        average_price = self._average_sector_price(sector_key)
+        affordable_unmet_units = residual_cash / max(0.1, average_price)
+        revealed_unmet_units = min(max(0.0, desired_units - bought_units), affordable_unmet_units)
+        if revealed_unmet_units <= 0.0:
+            return
+        self._period_sector_revealed_unmet_units[sector_key] += revealed_unmet_units
 
     def _draw_desired_children(self) -> int:
         choices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
@@ -1135,11 +1391,12 @@ class EconomySimulation:
     def _projected_family_labor_income(self, members: list[Household]) -> float:
         total_income = 0.0
         for member in members:
-            projected_income = max(0.0, member.last_income)
+            projected_income = self._household_observed_income(member)
             if member.employed_by is not None:
-                firm = self.firm_by_id.get(member.employed_by)
-                if firm is not None and firm.active:
-                    projected_income = max(projected_income, firm.wage_offer)
+                projected_income = max(
+                    projected_income,
+                    self._current_employer_wage_offer(member.employed_by),
+                )
             total_income += projected_income
         return total_income
 
@@ -1386,8 +1643,103 @@ class EconomySimulation:
                 requests.append((borrower, loan_need))
         return requests
 
-    def _estimate_firm_credit_requests(self) -> list[tuple[Firm, float]]:
-        requests: list[tuple[Firm, float]] = []
+    def _economy_investment_stability(self) -> float:
+        if not self.history:
+            return 1.0
+        last_snapshot = self.history[-1]
+        observed_inflation = 0.0
+        if len(self.history) > 1:
+            prior_price_index = max(1e-9, self.history[-2].price_index)
+            observed_inflation = max(0.0, (last_snapshot.price_index / prior_price_index) - 1.0)
+        target_inflation = self._annual_to_period_growth(self.config.central_bank_target_annual_inflation)
+        inflation_gap = max(0.0, observed_inflation - target_inflation)
+        unemployment_gap = max(0.0, last_snapshot.unemployment_rate - self.config.target_unemployment)
+        essential_gap = max(0.0, 1.0 - last_snapshot.essential_fulfillment_rate)
+        bank_fragility = max(0.0, getattr(last_snapshot, "bank_undercapitalized_share", 0.0))
+        recession_drag = max(0.0, getattr(last_snapshot, "recession_intensity", 0.0))
+        return clamp(
+            1.02
+            - 0.80 * inflation_gap
+            - 0.70 * unemployment_gap
+            - 0.55 * essential_gap
+            - 0.45 * bank_fragility
+            - 0.40 * recession_drag,
+            0.35,
+            1.15,
+        )
+
+    def _firm_investment_confidence(self, firm: Firm, *, macro_stability: float | None = None) -> float:
+        macro_stability = (
+            self._economy_investment_stability() if macro_stability is None else macro_stability
+        )
+        forecast_uncertainty = self._firm_forecast_uncertainty(firm)
+        cash_cover = clamp(self._firm_cash_cover_ratio(firm) / 1.5, 0.0, 1.25)
+        profit_margin = clamp(firm.last_profit / max(1.0, firm.last_revenue), -0.20, 0.30)
+        stability_component = clamp(
+            1.0 - max(0.0, firm.stability_sensitivity) * max(0.0, 1.0 - macro_stability),
+            0.20,
+            1.20,
+        )
+        confidence = (
+            stability_component
+            + 0.16 * max(0.0, firm.investment_animal_spirits - 1.0)
+            + 0.10 * cash_cover
+            + 0.12 * max(0.0, profit_margin)
+            - 0.18 * forecast_uncertainty
+        )
+        return clamp(confidence, 0.20, 1.45)
+
+    def _estimate_firm_expansion_credit_need(self, firm: Firm) -> float:
+        sell_through = self._firm_recent_sell_through(firm)
+        growth_pressure = self._firm_revealed_growth_pressure(firm)
+        if sell_through < 0.88 and growth_pressure <= 0.08:
+            return 0.0
+        profit_margin = clamp(firm.last_profit / max(1.0, firm.last_revenue), -0.25, 0.30)
+        if profit_margin < -0.05 and firm.loss_streak >= 2 and growth_pressure < 0.75:
+            return 0.0
+
+        macro_stability = self._economy_investment_stability()
+        confidence = self._firm_investment_confidence(firm, macro_stability=macro_stability)
+        loan_rate = max(0.0, self._loan_rate_for_firm(firm))
+        neutral_rate = max(1e-6, self.config.firm_interest_rate_neutral)
+        interest_drag = clamp((loan_rate - neutral_rate) / neutral_rate, -0.50, 2.0)
+        expansion_signal = clamp(
+            0.70 * growth_pressure + 0.55 * max(0.0, sell_through - 0.88),
+            0.0,
+            1.50,
+        )
+        base_budget = 0.18 * max(
+            20.0,
+            firm.capital + 0.60 * firm.last_wage_bill + 0.15 * max(1.0, firm.last_revenue),
+        )
+        appetite = clamp(firm.expansion_credit_appetite, 0.55, 1.75)
+        profit_support = clamp(0.70 + 0.80 * max(0.0, profit_margin + 0.05), 0.55, 1.25)
+        leverage_drag = clamp(firm.loan_balance / max(1.0, firm.last_revenue), 0.0, 3.0)
+        interest_penalty = max(
+            0.0,
+            1.0
+            - self.config.firm_expansion_credit_interest_sensitivity * max(0.0, interest_drag),
+        )
+        desired_budget = (
+            base_budget
+            * expansion_signal
+            * appetite
+            * confidence
+            * profit_support
+            * interest_penalty
+            * clamp(1.0 - 0.08 * leverage_drag, 0.55, 1.0)
+        )
+        max_credit = self.config.firm_expansion_credit_max_revenue_share * max(
+            1.0,
+            firm.last_revenue,
+            firm.last_expected_sales * max(0.1, firm.price),
+        )
+        if firm.sector in ESSENTIAL_SECTOR_KEYS:
+            max_credit *= 1.20
+        return clamp(desired_budget, 0.0, max_credit)
+
+    def _estimate_firm_credit_requests(self) -> list[tuple[Firm, float, str]]:
+        requests: list[tuple[Firm, float, str]] = []
         for firm in self.firms:
             if not firm.active:
                 continue
@@ -1417,16 +1769,19 @@ class EconomySimulation:
                 + firm.capital * self.config.depreciation_rate
             )
             buffer_target = 0.15 * max(1.0, prudent_sales_anchor * firm.price)
-            loan_need = max(0.0, working_capital_target + buffer_target - firm.cash)
-            if loan_need > 0.0:
-                requests.append((firm, loan_need))
+            working_capital_need = max(0.0, working_capital_target + buffer_target - firm.cash)
+            expansion_need = self._estimate_firm_expansion_credit_need(firm)
+            total_need = working_capital_need + expansion_need
+            if total_need > 0.0:
+                purpose = "expansion" if expansion_need > 0.0 else "working_capital"
+                requests.append((firm, total_need, purpose))
         return requests
 
     def _estimate_credit_demand_by_bank(self) -> dict[int, float]:
         demand_by_bank = {bank.id: 0.0 for bank in self.banks}
         for borrower, amount in self._estimate_household_credit_requests():
             demand_by_bank[self._bank_id_for_household(borrower)] += amount
-        for firm, amount in self._estimate_firm_credit_requests():
+        for firm, amount, _purpose in self._estimate_firm_credit_requests():
             demand_by_bank[self._bank_id_for_firm(firm)] += amount
         return demand_by_bank
 
@@ -1525,7 +1880,14 @@ class EconomySimulation:
         self._period_household_credit_issued += amount
         return amount
 
-    def _create_firm_credit(self, firm: Firm, amount: float, bank: CommercialBank) -> float:
+    def _create_firm_credit(
+        self,
+        firm: Firm,
+        amount: float,
+        bank: CommercialBank,
+        *,
+        purpose: str = "working_capital",
+    ) -> float:
         amount = max(0.0, amount)
         if amount <= 0.0:
             return 0.0
@@ -1533,6 +1895,8 @@ class EconomySimulation:
         firm.loan_balance += amount
         bank.loans_firms += amount
         self._period_firm_credit_issued += amount
+        if purpose == "expansion":
+            self._period_firm_expansion_credit_issued += amount
         return amount
 
     def _apply_bank_credit_policy(self) -> None:
@@ -1542,31 +1906,33 @@ class EconomySimulation:
         self._refresh_bank_balance_sheets()
         household_requests = self._estimate_household_credit_requests()
         firm_requests = self._estimate_firm_credit_requests()
-        requests_by_bank: dict[int, list[tuple[str, Household | Firm, float]]] = {
+        requests_by_bank: dict[int, list[tuple[str, Household | Firm, float, str | None]]] = {
             bank.id: [] for bank in self.banks
         }
 
         for borrower, amount in household_requests:
-            requests_by_bank[self._bank_id_for_household(borrower)].append(("household", borrower, amount))
-        for firm, amount in firm_requests:
-            requests_by_bank[self._bank_id_for_firm(firm)].append(("firm", firm, amount))
+            requests_by_bank[self._bank_id_for_household(borrower)].append(
+                ("household", borrower, amount, None)
+            )
+        for firm, amount, purpose in firm_requests:
+            requests_by_bank[self._bank_id_for_firm(firm)].append(("firm", firm, amount, purpose))
 
         for bank in self.banks:
             bank_requests = requests_by_bank.get(bank.id, [])
             if not bank_requests:
                 continue
 
-            approved_requests: list[tuple[str, Household | Firm, float]] = []
-            for request_type, borrower, amount in bank_requests:
+            approved_requests: list[tuple[str, Household | Firm, float, str | None]] = []
+            for request_type, borrower, amount, purpose in bank_requests:
                 approved = (
                     self._household_creditworthy(borrower, amount, bank)
                     if request_type == "household"
                     else self._firm_creditworthy(borrower, amount, bank)
                 )
                 if approved:
-                    approved_requests.append((request_type, borrower, amount))
+                    approved_requests.append((request_type, borrower, amount, purpose))
 
-            total_request = sum(amount for _, _, amount in approved_requests)
+            total_request = sum(amount for _, _, amount, _ in approved_requests)
             if total_request <= 0.0:
                 continue
 
@@ -1586,14 +1952,14 @@ class EconomySimulation:
                 continue
 
             allocation_scale = loan_pool / total_request
-            for request_type, borrower, amount in approved_requests:
+            for request_type, borrower, amount, purpose in approved_requests:
                 granted = amount * allocation_scale
                 if granted <= 0.0:
                     continue
                 if request_type == "household":
                     self._create_household_credit(borrower, granted, bank)
                 else:
-                    self._create_firm_credit(borrower, granted, bank)
+                    self._create_firm_credit(borrower, granted, bank, purpose=purpose or "working_capital")
 
             reserve_requirement = self._bank_reserve_requirement(bank)
             excess_reserves = max(0.0, bank.reserves - reserve_requirement)
@@ -1659,6 +2025,95 @@ class EconomySimulation:
             (self._average_sector_price(spec.key) / spec.base_price) * spec.household_demand_share
             for spec in SECTOR_SPECS
         )
+
+    def _sector_price_relative(self, sector_key: str) -> float:
+        spec = SECTOR_BY_KEY[sector_key]
+        return self._average_sector_price(sector_key) / max(1e-9, spec.base_price)
+
+    def _bundle_price_index(self, weights: dict[str, float], fallback: float | None = None) -> float:
+        positive_weights = {sector_key: max(0.0, weight) for sector_key, weight in weights.items() if weight > 0.0}
+        if not positive_weights:
+            return max(1e-9, fallback if fallback is not None else self._current_price_index_estimate())
+        total_weight = sum(positive_weights.values())
+        if total_weight <= 0.0:
+            return max(1e-9, fallback if fallback is not None else self._current_price_index_estimate())
+        return sum(
+            self._sector_price_relative(sector_key) * weight
+            for sector_key, weight in positive_weights.items()
+        ) / total_weight
+
+    def _inventory_price_index_estimate(self, fallback: float | None = None) -> float:
+        numerator = 0.0
+        denominator = 0.0
+        for firm in self.firms:
+            if not firm.active or firm.inventory <= 0.0:
+                continue
+            spec = SECTOR_BY_KEY[firm.sector]
+            numerator += max(0.0, firm.inventory) * max(0.1, firm.price)
+            denominator += max(0.0, firm.inventory) * max(0.1, spec.base_price)
+        if denominator <= 0.0:
+            return max(1e-9, fallback if fallback is not None else self._current_price_index_estimate())
+        return numerator / denominator
+
+    def _government_consumption_price_index_estimate(
+        self,
+        procurement_spending: float,
+        school_spending: float,
+        university_spending: float,
+        public_administration_spending: float,
+        fallback: float | None = None,
+    ) -> float:
+        weights = {
+            sector_key: procurement_spending * self._essential_basket_share(sector_key)
+            for sector_key in ESSENTIAL_SECTOR_KEYS
+        }
+        weights["school"] = school_spending
+        weights["university"] = university_spending
+        weights["public_administration"] = public_administration_spending
+        return self._bundle_price_index(weights, fallback=fallback)
+
+    def _gdp_deflator_estimate(
+        self,
+        *,
+        gdp_nominal: float,
+        household_final_consumption: float,
+        government_final_consumption: float,
+        gross_fixed_capital_formation: float,
+        change_in_inventories: float,
+        net_exports: float,
+        price_index: float,
+        government_procurement_spending: float,
+        government_school_spending: float,
+        government_university_spending: float,
+        government_public_administration_spending: float,
+    ) -> float:
+        cpi = max(1e-9, price_index)
+        government_deflator = self._government_consumption_price_index_estimate(
+            government_procurement_spending,
+            government_school_spending,
+            government_university_spending,
+            government_public_administration_spending,
+            fallback=cpi,
+        )
+        investment_deflator = max(1e-9, self._sector_price_relative("manufactured"))
+        inventory_deflator = self._inventory_price_index_estimate(fallback=investment_deflator)
+        trade_deflator = cpi
+
+        real_household_final_consumption = household_final_consumption / cpi
+        real_government_final_consumption = government_final_consumption / government_deflator
+        real_gross_fixed_capital_formation = gross_fixed_capital_formation / investment_deflator
+        real_change_in_inventories = change_in_inventories / inventory_deflator
+        real_net_exports = net_exports / trade_deflator
+        real_gdp = (
+            real_household_final_consumption
+            + real_government_final_consumption
+            + real_gross_fixed_capital_formation
+            + real_change_in_inventories
+            + real_net_exports
+        )
+        if gdp_nominal <= 0.0 or real_gdp <= 1e-9:
+            return cpi
+        return gdp_nominal / real_gdp
 
     def _current_inventory_book_value(self) -> float:
         return sum(
@@ -2024,7 +2479,13 @@ class EconomySimulation:
         self.government.treasury_cash += amount
         self.government.tax_revenue_this_period += amount
         self._period_government_tax_revenue += amount
-        if revenue_type == "corporate":
+        if revenue_type == "labor":
+            self.government.labor_tax_revenue += amount
+            self._period_government_labor_tax_revenue += amount
+        elif revenue_type == "payroll":
+            self.government.payroll_tax_revenue += amount
+            self._period_government_payroll_tax_revenue += amount
+        elif revenue_type == "corporate":
             self.government.corporate_tax_revenue += amount
             self._period_government_corporate_tax_revenue += amount
         elif revenue_type == "dividend":
@@ -2054,6 +2515,22 @@ class EconomySimulation:
         if dividend_multiple >= self.config.government_dividend_bracket_low:
             return self.config.government_dividend_tax_rate_mid
         return self.config.government_dividend_tax_rate_low
+
+    def _government_labor_tax_rate(self, gross_wage: float) -> float:
+        if not self.config.government_enabled or gross_wage <= 0.0:
+            return 0.0
+        living_wage_anchor = max(1.0, self._living_wage_anchor())
+        wage_multiple = gross_wage / living_wage_anchor
+        if wage_multiple >= self.config.government_labor_tax_bracket_high:
+            return self.config.government_labor_tax_rate_high
+        if wage_multiple >= self.config.government_labor_tax_bracket_low:
+            return self.config.government_labor_tax_rate_mid
+        return self.config.government_labor_tax_rate_low
+
+    def _government_payroll_tax_rate(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        return max(0.0, self.config.government_payroll_tax_rate)
 
     def _issue_government_bonds(self, amount: float) -> float:
         amount = max(0.0, amount)
@@ -2274,21 +2751,32 @@ class EconomySimulation:
         procurement_multiplier = self._government_countercyclical_procurement_multiplier(recession_intensity)
         self._period_government_countercyclical_procurement_multiplier = procurement_multiplier
         spending_efficiency = clamp(self.config.government_spending_efficiency, 0.0, 1.0)
+        structural_procurement_budget = (
+            max(0.0, self.config.government_structural_procurement_budget_share)
+            * self._government_structural_budget_anchor()
+        )
         procurement_targets: list[tuple[str, float, float]] = []
         total_budget_needed = 0.0
         for sector_key in ESSENTIAL_SECTOR_KEYS:
             minimum_required_units = population * self._essential_basket_share(sector_key)
             private_units_sold = self._period_sector_sales_units.get(sector_key, 0.0)
             unmet_units = max(0.0, minimum_required_units - private_units_sold)
-            target_units = (
+            average_price = self._average_sector_price(sector_key)
+            structural_units = (
+                structural_procurement_budget
+                * self._essential_basket_share(sector_key)
+                * procurement_multiplier
+                / max(0.1, average_price)
+            )
+            gap_units = (
                 unmet_units
                 * max(0.0, self.config.government_procurement_gap_share)
                 * spending_scale
                 * procurement_multiplier
             )
+            target_units = gap_units + structural_units
             if target_units <= 0.0:
                 continue
-            average_price = self._average_sector_price(sector_key)
             budget_needed = target_units * average_price
             procurement_targets.append((sector_key, target_units, budget_needed))
             total_budget_needed += budget_needed
@@ -2332,6 +2820,50 @@ class EconomySimulation:
                 self._period_government_countercyclical_spending += max(0.0, countercyclical_extra)
         return total_spent
 
+    def _apply_government_infrastructure_investment(self) -> float:
+        depreciation_rate = clamp(self.config.government_public_capital_depreciation_rate, 0.0, 0.25)
+        self.government.public_capital_stock = max(
+            0.0,
+            self.government.public_capital_stock * (1.0 - depreciation_rate),
+        )
+        if not self.config.government_enabled:
+            return 0.0
+
+        infrastructure_budget = (
+            max(0.0, self.config.government_infrastructure_budget_share)
+            * self._government_structural_budget_anchor()
+        )
+        if infrastructure_budget <= 0.0:
+            return 0.0
+
+        financing_gap = max(0.0, infrastructure_budget - self.government.treasury_cash)
+        if financing_gap > 0.0:
+            self._issue_government_bonds(financing_gap)
+
+        affordable_budget = min(self.government.treasury_cash, infrastructure_budget)
+        spending_efficiency = clamp(self.config.government_spending_efficiency, 0.0, 1.0)
+        effective_budget = affordable_budget * spending_efficiency
+        if effective_budget <= 0.0:
+            return 0.0
+
+        manufactured_share = 0.60
+        housing_share = 0.40
+        manufactured_spend = effective_budget * manufactured_share
+        housing_spend = effective_budget * housing_share
+        self._distribute_payment_to_sector("manufactured", manufactured_spend, book_profit=True)
+        self._distribute_payment_to_sector("housing", housing_spend, book_profit=True)
+        realized_investment = manufactured_spend + housing_spend
+        gross_spent = realized_investment / max(1e-9, spending_efficiency)
+        leakage = gross_spent - realized_investment
+        if leakage > 0.0:
+            self._distribute_government_spending_leakage(leakage)
+        self.government.treasury_cash = max(0.0, self.government.treasury_cash - gross_spent)
+        self.government.infrastructure_spending_this_period += gross_spent
+        self._period_government_infrastructure_spending += gross_spent
+        self._period_government_public_capital_formation += realized_investment
+        self.government.public_capital_stock += realized_investment
+        return gross_spent
+
     def _collect_government_wealth_tax(self) -> float:
         if not self.config.government_enabled:
             return 0.0
@@ -2352,11 +2884,201 @@ class EconomySimulation:
             total_collected += self._record_government_tax_revenue(collected, "wealth")
         return total_collected
 
+    def _government_recent_tax_anchor(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        lookback = max(1, int(self.config.periods_per_year))
+        tax_values = [max(0.0, snapshot.government_tax_revenue) for snapshot in self.history[-lookback:]]
+        current_tax = max(0.0, self._period_government_tax_revenue)
+        if current_tax > 0.0:
+            tax_values.append(current_tax)
+        if not tax_values:
+            return 0.0
+        return sum(tax_values) / len(tax_values)
+
+    def _government_recent_direct_spending_anchor(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        lookback = max(1, int(self.config.periods_per_year))
+        direct_spending = [
+            max(
+                0.0,
+                snapshot.government_procurement_spending
+                + snapshot.government_education_spending
+                + getattr(snapshot, "government_public_administration_spending", 0.0)
+                + getattr(snapshot, "government_infrastructure_spending", 0.0),
+            )
+            for snapshot in self.history[-lookback:]
+        ]
+        current_direct_spending = max(
+            0.0,
+            self._period_government_procurement_spending
+            + self._period_government_education_spending
+            + self._period_government_public_administration_spending
+            + self._period_government_infrastructure_spending,
+        )
+        if current_direct_spending > 0.0:
+            direct_spending.append(current_direct_spending)
+        if not direct_spending:
+            return 0.0
+        return sum(direct_spending) / len(direct_spending)
+
+    def _government_recent_gdp_anchor(self) -> float:
+        if not self.history:
+            return 0.0
+        lookback = max(1, int(self.config.periods_per_year))
+        gdp_values = [max(0.0, getattr(snapshot, "gdp_nominal", 0.0)) for snapshot in self.history[-lookback:]]
+        if not gdp_values:
+            return 0.0
+        return sum(gdp_values) / len(gdp_values)
+
+    def _government_direct_budget_share_sum(self) -> float:
+        return max(
+            0.0,
+            max(0.0, self.config.government_structural_procurement_budget_share)
+            + max(0.0, self.config.public_school_budget_share)
+            + max(0.0, self.config.public_university_budget_share)
+            + max(0.0, self.config.public_administration_budget_share),
+        )
+
+    def _government_structural_budget_anchor(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        recent_tax = self._government_recent_tax_anchor()
+        recent_direct_spending = self._government_recent_direct_spending_anchor()
+        recent_gdp = self._government_recent_gdp_anchor()
+        annualized_tax = recent_tax * max(1, int(self.config.periods_per_year))
+        debt_ratio = self.government.debt_outstanding / max(1e-9, annualized_tax)
+        debt_brake = clamp(1.0 - 0.18 * max(0.0, debt_ratio - 1.0), 0.35, 1.0)
+        deficit_tolerance = clamp(self.config.government_structural_deficit_tolerance, 0.0, 2.0)
+        structural_budget = recent_tax * (1.0 + deficit_tolerance * debt_brake)
+        direct_budget_share_sum = self._government_direct_budget_share_sum()
+        direct_consumption_floor = max(0.0, self.config.government_final_consumption_floor_share_gdp)
+        direct_budget_floor = 0.0
+        if recent_gdp > 0.0 and direct_budget_share_sum > 1e-9 and direct_consumption_floor > 0.0:
+            direct_budget_floor = recent_gdp * direct_consumption_floor / direct_budget_share_sum
+        return max(
+            0.0,
+            self.government.treasury_cash,
+            recent_direct_spending,
+            structural_budget,
+            direct_budget_floor,
+        )
+
+    def _public_administration_budget(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        return (
+            max(0.0, self.config.public_administration_budget_share)
+            * self._government_structural_budget_anchor()
+        )
+
+    def _public_administration_worker_score(self, household: Household) -> tuple[float, float, float]:
+        return (
+            self._worker_effective_labor_for_sector(household, "public_administration"),
+            -household.reservation_wage,
+            -self._household_age_years(household),
+        )
+
+    def _manage_public_administration_workforce(self) -> None:
+        public_workers = [
+            household
+            for household in self._active_households()
+            if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID
+        ]
+        if not self.config.government_enabled:
+            for household in public_workers:
+                self._release_household_from_employment(household)
+            return
+        target_workers = self._public_administration_target_workers()
+        if len(public_workers) > target_workers:
+            release_order = sorted(
+                public_workers,
+                key=lambda household: (
+                    self._worker_effective_labor_for_sector(household, "public_administration"),
+                    -household.reservation_wage,
+                    household.id,
+                ),
+            )
+            for household in release_order[: len(public_workers) - target_workers]:
+                self._release_household_from_employment(household)
+            public_workers = [
+                household
+                for household in self._active_households()
+                if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID
+            ]
+        if len(public_workers) >= target_workers:
+            return
+        wage_offer = self._public_administration_wage_offer()
+        candidates = [
+            household
+            for household in self._active_households()
+            if self._household_labor_capacity(household) > 0.0
+            and household.employed_by is None
+            and household.reservation_wage <= wage_offer
+        ]
+        candidates.sort(key=self._public_administration_worker_score, reverse=True)
+        vacancies = target_workers - len(public_workers)
+        for household in candidates[:vacancies]:
+            household.employed_by = PUBLIC_ADMINISTRATION_EMPLOYER_ID
+            household.employment_tenure = 0
+
+    def _pay_public_administration_wages(self) -> float:
+        if not self.config.government_enabled:
+            return 0.0
+        public_workers = [
+            household
+            for household in self._active_households()
+            if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID
+        ]
+        if not public_workers:
+            return 0.0
+        wage_offer = self._public_administration_wage_offer()
+        planned_payroll = wage_offer * len(public_workers)
+        administration_budget = self._public_administration_budget()
+        nonpayroll_budget = max(0.0, administration_budget - self._public_administration_payroll_budget())
+        planned_total_spending = planned_payroll + nonpayroll_budget
+        if planned_total_spending <= 0.0:
+            return 0.0
+        financing_gap = max(0.0, planned_total_spending - self.government.treasury_cash)
+        if financing_gap > 0.0:
+            self._issue_government_bonds(financing_gap)
+        affordable_scale = min(1.0, self.government.treasury_cash / max(1e-9, planned_total_spending))
+        if affordable_scale <= 0.0:
+            return 0.0
+        effective_wage = wage_offer * affordable_scale
+        total_paid = effective_wage * len(public_workers)
+        for household in public_workers:
+            labor_tax = min(
+                effective_wage,
+                effective_wage * self._government_labor_tax_rate(effective_wage),
+            )
+            net_wage = effective_wage - labor_tax
+            household.wage_income += net_wage
+            household.last_income += net_wage
+            if labor_tax > 0.0:
+                self._record_government_tax_revenue(labor_tax, "labor")
+        self.government.treasury_cash = max(0.0, self.government.treasury_cash - total_paid)
+        self.government.public_administration_spending_this_period += total_paid
+        self._period_government_public_administration_spending += total_paid
+        self._period_wages += total_paid
+        self._period_sales_revenue += total_paid
+        nonpayroll_spending = nonpayroll_budget * affordable_scale
+        if nonpayroll_spending > 0.0:
+            self.government.treasury_cash = max(0.0, self.government.treasury_cash - nonpayroll_spending)
+            self.government.public_administration_spending_this_period += nonpayroll_spending
+            self._period_government_public_administration_spending += nonpayroll_spending
+            self._queue_sector_payment("manufactured", nonpayroll_spending * 0.60)
+            self._queue_sector_payment("housing", nonpayroll_spending * 0.40)
+        return total_paid + nonpayroll_spending
+
     def _finalize_government_period(self) -> None:
         spending = (
             self._period_government_transfers
             + self._period_government_procurement_spending
             + self._period_government_education_spending
+            + self._period_government_public_administration_spending
+            + self._period_government_infrastructure_spending
         )
         tax_revenue = self._period_government_tax_revenue
         net_balance = tax_revenue - spending
@@ -2600,11 +3322,85 @@ class EconomySimulation:
         age_years = self._household_age_years(household)
         return self.config.university_age_min_years <= age_years < self.config.university_age_max_years
 
+    def _public_education_target_units(
+        self,
+        household: Household,
+        sector_key: str,
+        target_units: float,
+    ) -> float:
+        target_units = max(0.0, target_units)
+        if target_units <= 0.0:
+            return 0.0
+        age_years = self._household_age_years(household)
+        family_resource_coverage = self._household_family_resource_coverage(household)
+        low_resource_bonus = (
+            max(0.0, self.config.public_education_low_resource_priority_bonus)
+            if family_resource_coverage < 1.0
+            else 0.0
+        )
+        if sector_key == "school":
+            if self._is_school_age(household):
+                coverage_share = max(
+                    max(0.0, self.config.public_school_min_target_units),
+                    max(0.0, self.config.public_school_support_package_share),
+                )
+                coverage_share += low_resource_bonus
+                coverage_share += (
+                    max(0.0, self.config.public_school_support_continuity_bonus)
+                    * household.public_school_support_persistence
+                )
+            elif (
+                age_years < self.config.adult_school_catchup_age_max_years
+                and not self._household_has_school_credential(household)
+            ):
+                coverage_share = max(
+                    max(0.0, self.config.adult_school_catchup_target_units),
+                    0.60 * max(0.0, self.config.public_school_support_package_share),
+                )
+                coverage_share += 0.5 * low_resource_bonus
+            else:
+                coverage_share = 0.0
+        elif sector_key == "university":
+            if self._is_university_age(household) and self._household_has_school_credential(household):
+                coverage_share = max(
+                    max(0.0, self.config.public_university_min_target_units),
+                    max(0.0, self.config.public_university_support_package_share),
+                )
+                coverage_share += low_resource_bonus
+                coverage_share += (
+                    max(0.0, self.config.public_university_support_continuity_bonus)
+                    * household.public_university_support_persistence
+                )
+            elif (
+                age_years < self.config.adult_university_catchup_age_max_years
+                and self._household_has_school_credential(household)
+                and not self._household_has_university_credential(household)
+            ):
+                coverage_share = max(
+                    max(0.0, self.config.adult_university_catchup_target_units),
+                    0.55 * max(0.0, self.config.public_university_support_package_share),
+                )
+                coverage_share += 0.5 * low_resource_bonus
+            else:
+                coverage_share = 0.0
+        else:
+            return 0.0
+        return target_units * clamp(coverage_share, 0.0, 1.0)
+
     def _university_track_threshold(self) -> float:
         return 1.0 - clamp(self.config.initial_university_completion_share, 0.0, 1.0)
 
     def _household_is_university_track(self, household: Household) -> bool:
         return household.higher_education_affinity >= self._university_track_threshold()
+
+    def _household_university_track_factor(self, household: Household) -> float:
+        threshold = self._university_track_threshold()
+        distance = household.higher_education_affinity - threshold
+        factor = clamp(0.45 + 1.60 * (distance + 0.18), 0.15, 1.20)
+        if self._household_family_resource_coverage(household) < 1.0:
+            factor += 0.10
+        factor += 0.20 * household.public_university_support_persistence
+        return clamp(factor, 0.0, 1.25)
 
     def _household_family_resource_coverage(self, household: Household) -> float:
         cached = self._period_family_resource_coverage_cache.get(household.id)
@@ -2656,8 +3452,8 @@ class EconomySimulation:
         if not self._is_school_age(household):
             return 0.0
         preference = self._household_sector_preference(household, "school")
-        market_factor = self._household_education_market_factor(household, advanced=False)
-        return clamp((0.90 + 0.18 * preference) * market_factor, 0.0, 1.20)
+        continuity_bonus = 0.08 * household.public_school_support_persistence
+        return clamp(0.92 + 0.16 * preference + continuity_bonus, 0.70, 1.20)
 
     def _university_service_target_units(self, household: Household) -> float:
         if not self._is_university_age(household):
@@ -2666,11 +3462,15 @@ class EconomySimulation:
             return 0.0
         if not self._household_has_school_credential(household):
             return 0.0
-        if not self._household_is_university_track(household):
-            return 0.0
         preference = self._household_sector_preference(household, "university")
-        market_factor = self._household_education_market_factor(household, advanced=True)
-        return clamp((0.85 + 0.24 * preference) * market_factor, 0.0, 1.30)
+        market_factor = clamp(
+            0.55 + 0.45 * min(1.5, self._household_family_resource_coverage(household)) / 1.5,
+            0.45,
+            1.05,
+        )
+        track_factor = self._household_university_track_factor(household)
+        continuity_bonus = 0.10 * household.public_university_support_persistence
+        return clamp((0.72 + 0.22 * preference + continuity_bonus) * market_factor * track_factor, 0.0, 1.30)
 
     def _household_skill_multiplier(self, household: Household, sector_key: str) -> float:
         if sector_key in ESSENTIAL_SECTOR_KEYS:
@@ -2685,6 +3485,8 @@ class EconomySimulation:
             return 1.25 if has_university else 1.12 if has_school else 0.78
         if sector_key == "university":
             return 1.45 if has_university else 1.05 if has_school else 0.72
+        if sector_key == "public_administration":
+            return 1.38 if has_university else 1.12 if has_school else 0.80
         return 1.0
 
     def _ensure_household_demand_shares(self, household: Household) -> None:
@@ -3040,25 +3842,72 @@ class EconomySimulation:
         variable_unit_cost: float,
         fixed_cost: float,
     ) -> float:
-        inventory_pressure = max(0.0, firm.inventory - firm.target_inventory)
-        inventory_relief_units = min(prudent_sales, inventory_pressure)
-        unit_contribution = max(0.0, effective_price - variable_unit_cost)
         affordability_pressure = self._essential_affordability_pressure() if spec.key in ESSENTIAL_SECTOR_KEYS else 0.0
 
-        # Rational objective: current operating profit plus expected retained market value
-        # and the benefit of clearing costly excess inventory, minus fragility risk.
+        # Rational objective: expected monthly profit plus retained market value,
+        # minus fragility risk. Inventory costs are charged explicitly elsewhere.
         future_weight = (
             0.65
             + 0.90 * self._firm_future_market_weight(firm)
             + 0.20 * max(0.0, firm.market_share_ambition - 1.0)
             + (0.45 * affordability_pressure if spec.key in ESSENTIAL_SECTOR_KEYS else 0.0)
         )
-        inventory_relief_value = inventory_relief_units * max(0.0, unit_contribution + 0.15 * variable_unit_cost)
         hazard_penalty = market_hazard * (
             fixed_cost * (0.80 + 0.30 * firm.cash_conservatism)
             + 0.30 * future_market_value
         )
-        return candidate_profit + future_weight * future_market_value + inventory_relief_value - hazard_penalty
+        return candidate_profit + future_weight * future_market_value - hazard_penalty
+
+    def _candidate_total_profit(
+        self,
+        firm: Firm,
+        prudent_sales: float,
+        effective_price: float,
+        variable_unit_cost: float,
+        fixed_cost: float,
+    ) -> float:
+        projected_revenue = max(0.0, prudent_sales) * max(0.0, effective_price)
+        effective_productivity = self._firm_effective_productivity(firm)
+        if self._is_education_sector(firm.sector):
+            projected_output = self._education_service_target_units(firm, prudent_sales)
+            desired_workers = self._workers_needed_for_units(
+                projected_output,
+                effective_productivity,
+                productivity_floor=0.25,
+            )
+        else:
+            projected_output = self._firm_desired_output_from_expected_sales(firm, prudent_sales)
+            desired_workers = self._workers_needed_for_units(projected_output, effective_productivity)
+
+        wage_bill = desired_workers * firm.wage_offer
+        payroll_tax = wage_bill * self._government_payroll_tax_rate()
+        input_cost = projected_output * firm.input_cost_per_unit
+        transport_cost = (
+            projected_output
+            * firm.transport_cost_per_unit
+            * self._public_infrastructure_transport_cost_multiplier()
+        )
+        projected_inventory, projected_waste_units = self._project_inventory_end_of_period(
+            firm,
+            projected_output,
+            prudent_sales,
+        )
+        inventory_cost_basis = self._inventory_cost_basis(
+            firm,
+            variable_unit_cost + fixed_cost / max(1.0, prudent_sales if prudent_sales > 0.0 else projected_output),
+        )
+        carry_cost = projected_inventory * inventory_cost_basis * max(0.0, self.config.inventory_carry_cost_share)
+        waste_cost = projected_waste_units * inventory_cost_basis
+        total_cost = (
+            wage_bill
+            + payroll_tax
+            + input_cost
+            + transport_cost
+            + fixed_cost
+            + carry_cost
+            + waste_cost
+        )
+        return projected_revenue - total_cost
 
     def _compute_structural_demand_map(
         self,
@@ -3567,6 +4416,69 @@ class EconomySimulation:
         firm_experience = clamp(max(0, firm.age - 1) / warmup_periods, 0.0, 1.0)
         return clamp(0.85 * market_maturity + 0.15 * firm_experience, 0.0, 1.0)
 
+    def _firm_market_memory_periods(self) -> int:
+        return max(
+            6,
+            int(round(max(0.5, self.config.firm_market_memory_years) * max(1, self.config.periods_per_year))),
+        )
+
+    def _firm_sales_forecast_window_periods(self) -> int:
+        return max(2, int(round(max(1, self.config.periods_per_year) * 0.5)))
+
+    def _firm_inventory_shelf_life_periods(self) -> int:
+        configured_months = max(1, self.config.inventory_shelf_life_months)
+        return max(1, int(round(max(1, self.config.periods_per_year) * configured_months / 12.0)))
+
+    def _firm_memory_slice(self, firm: Firm) -> list[float]:
+        memory_periods = self._firm_market_memory_periods()
+        if not firm.sales_history:
+            return []
+        return firm.sales_history[-memory_periods:]
+
+    def _firm_recent_average(
+        self,
+        series: list[float],
+        *,
+        fallback: float,
+        floor: float = 0.0,
+    ) -> float:
+        if not series:
+            return max(floor, fallback)
+        window = min(len(series), self._firm_sales_forecast_window_periods())
+        if window <= 0:
+            return max(floor, fallback)
+        return max(floor, sum(series[-window:]) / window)
+
+    def _recent_history_window(self) -> int:
+        return self._firm_sales_forecast_window_periods()
+
+    def _recent_snapshots(self) -> list[PeriodSnapshot]:
+        window = self._recent_history_window()
+        if window <= 0 or not self.history:
+            return []
+        return self.history[-window:]
+
+    def _recent_sector_signal_average(
+        self,
+        history_map: dict[str, list[float]],
+        sector_key: str,
+        *,
+        fallback: float,
+    ) -> float:
+        series = history_map.get(sector_key, [])
+        return self._firm_recent_average(series, fallback=fallback, floor=0.0)
+
+    def _firm_recent_prior_sales_windows(self, firm: Firm) -> tuple[list[float], list[float]]:
+        history = self._firm_memory_slice(firm)
+        if len(history) < 4:
+            return history, []
+        recent_window_size = max(3, min(len(history) // 3, max(3, self.config.periods_per_year)))
+        recent_window = history[-recent_window_size:]
+        prior_window = history[:-recent_window_size]
+        if prior_window:
+            prior_window = prior_window[-recent_window_size:]
+        return recent_window, prior_window
+
     def _sector_demand_elasticity_prior(self, sector_key: str) -> float:
         if sector_key == "food":
             return 0.82
@@ -3583,13 +4495,132 @@ class EconomySimulation:
         return 1.32
 
     def _smoothed_sales_reference(self, firm: Firm) -> float:
-        if not firm.sales_history:
+        history = self._firm_memory_slice(firm)
+        if not history:
             return max(1.0, firm.last_sales, firm.last_expected_sales)
-        recent_window = firm.sales_history[-4:]
-        long_window = firm.sales_history[-8:] if len(firm.sales_history) >= 8 else firm.sales_history
-        recent_average = sum(recent_window) / len(recent_window)
-        long_average = sum(long_window) / len(long_window)
-        return max(1.0, 0.60 * recent_average + 0.40 * long_average)
+        forecast_window_size = min(len(history), self._firm_sales_forecast_window_periods())
+        forecast_window = history[-forecast_window_size:]
+        return max(1.0, sum(forecast_window) / len(forecast_window))
+
+    def _smoothed_expected_sales_reference(self, firm: Firm) -> float:
+        return self._firm_recent_average(
+            firm.expected_sales_history,
+            fallback=max(1.0, firm.last_expected_sales, self._smoothed_sales_reference(firm)),
+            floor=1.0,
+        )
+
+    def _smoothed_production_reference(self, firm: Firm) -> float:
+        return self._firm_recent_average(
+            firm.production_history,
+            fallback=max(0.0, firm.last_production, self._smoothed_sales_reference(firm)),
+            floor=0.0,
+        )
+
+    def _inventory_cost_basis(self, firm: Firm, unit_cost: float | None = None) -> float:
+        if unit_cost is not None:
+            return max(0.1, unit_cost)
+        return max(0.1, firm.last_unit_cost, firm.input_cost_per_unit + firm.transport_cost_per_unit)
+
+    def _ensure_inventory_batches(self, firm: Firm) -> None:
+        if self._is_education_sector(firm.sector):
+            firm.inventory_batches = []
+            return
+        total_batches = sum(max(0.0, batch) for batch in firm.inventory_batches)
+        inventory_units = max(0.0, firm.inventory)
+        if inventory_units <= 1e-9:
+            firm.inventory = 0.0
+            firm.inventory_batches = []
+            return
+        if not firm.inventory_batches or abs(total_batches - inventory_units) > 1e-6:
+            firm.inventory_batches = [inventory_units]
+            return
+        firm.inventory_batches = [max(0.0, batch) for batch in firm.inventory_batches if batch > 1e-9]
+
+    def _sync_inventory_from_batches(self, firm: Firm) -> None:
+        if self._is_education_sector(firm.sector):
+            return
+        firm.inventory = sum(max(0.0, batch) for batch in firm.inventory_batches)
+
+    def _add_inventory_units(self, firm: Firm, units: float) -> None:
+        if units <= 0.0:
+            return
+        if self._is_education_sector(firm.sector):
+            firm.inventory = max(0.0, units)
+            return
+        self._ensure_inventory_batches(firm)
+        firm.inventory_batches.append(max(0.0, units))
+        self._sync_inventory_from_batches(firm)
+
+    def _remove_inventory_units(self, firm: Firm, units: float) -> float:
+        if units <= 0.0:
+            return 0.0
+        if self._is_education_sector(firm.sector):
+            removed = min(max(0.0, units), max(0.0, firm.inventory))
+            firm.inventory = max(0.0, firm.inventory - removed)
+            return removed
+        self._ensure_inventory_batches(firm)
+        remaining = max(0.0, units)
+        removed = 0.0
+        updated_batches: list[float] = []
+        for batch in firm.inventory_batches:
+            if remaining <= 1e-9:
+                updated_batches.append(batch)
+                continue
+            take = min(batch, remaining)
+            batch -= take
+            remaining -= take
+            removed += take
+            if batch > 1e-9:
+                updated_batches.append(batch)
+        firm.inventory_batches = updated_batches
+        self._sync_inventory_from_batches(firm)
+        return removed
+
+    def _project_inventory_end_of_period(
+        self,
+        firm: Firm,
+        production_units: float,
+        sales_units: float,
+    ) -> tuple[float, float]:
+        if self._is_education_sector(firm.sector):
+            end_inventory = max(0.0, production_units - sales_units)
+            return end_inventory, 0.0
+        self._ensure_inventory_batches(firm)
+        projected_batches = [max(0.0, batch) for batch in firm.inventory_batches if batch > 1e-9]
+        if production_units > 0.0:
+            projected_batches.append(max(0.0, production_units))
+        remaining_sales = max(0.0, sales_units)
+        for index in range(len(projected_batches)):
+            if remaining_sales <= 1e-9:
+                break
+            take = min(projected_batches[index], remaining_sales)
+            projected_batches[index] -= take
+            remaining_sales -= take
+        projected_batches = [batch for batch in projected_batches if batch > 1e-9]
+        shelf_life = self._firm_inventory_shelf_life_periods()
+        expiring_units = sum(projected_batches[:-shelf_life]) if len(projected_batches) > shelf_life else 0.0
+        end_inventory = sum(projected_batches[-shelf_life:]) if shelf_life > 0 else 0.0
+        return max(0.0, end_inventory), max(0.0, expiring_units)
+
+    def _apply_inventory_carry_and_waste(self, firm: Firm) -> tuple[float, float]:
+        if self._is_education_sector(firm.sector):
+            firm.last_inventory_carry_cost = 0.0
+            firm.last_inventory_waste_cost = 0.0
+            return 0.0, 0.0
+        self._ensure_inventory_batches(firm)
+        carry_cost = max(0.0, firm.inventory) * self._inventory_cost_basis(firm) * max(
+            0.0,
+            self.config.inventory_carry_cost_share,
+        )
+        shelf_life = self._firm_inventory_shelf_life_periods()
+        waste_units = sum(firm.inventory_batches[:-shelf_life]) if len(firm.inventory_batches) > shelf_life else 0.0
+        if waste_units > 0.0:
+            firm.inventory_batches = firm.inventory_batches[-shelf_life:]
+            self._sync_inventory_from_batches(firm)
+        waste_cost = waste_units * self._inventory_cost_basis(firm)
+        firm.last_inventory_carry_cost = carry_cost
+        firm.last_inventory_waste_cost = waste_cost
+        return carry_cost, waste_cost
 
     def _household_consumption_multiplier(self, household: Household) -> float:
         age_years = self._household_age_years(household)
@@ -3801,8 +4832,45 @@ class EconomySimulation:
         family_groups = list(self._family_groups().values())
         if len(family_groups) <= 1:
             return family_groups
-        self.rng.shuffle(family_groups)
-        return family_groups
+        if not self.config.government_enabled:
+            self.rng.shuffle(family_groups)
+            return family_groups
+        ranked_groups = [
+            (
+                self._family_public_education_priority(group),
+                self.rng.random(),
+                group,
+            )
+            for group in family_groups
+        ]
+        ranked_groups.sort(key=lambda item: (-item[0], item[1]))
+        return [group for _, _, group in ranked_groups]
+
+    def _family_public_education_priority(self, family_members: list[Household]) -> float:
+        score = 0.0
+        if not family_members:
+            return score
+        family_resource_coverage = min(
+            (self._household_family_resource_coverage(member) for member in family_members),
+            default=1.0,
+        )
+        for member in family_members:
+            if self._is_school_age(member) and not self._household_has_school_credential(member):
+                score += 4.0
+                score += 2.0 * member.public_school_support_persistence
+                if family_resource_coverage < 1.0:
+                    score += 2.0
+            if (
+                self._is_university_age(member)
+                and self._household_has_school_credential(member)
+                and not self._household_has_university_credential(member)
+            ):
+                score += 3.0 * max(0.25, self._household_university_track_factor(member))
+                score += 3.0 * member.public_university_support_persistence
+                if family_resource_coverage < 1.0:
+                    score += 2.5
+        score += clamp(1.0 - family_resource_coverage, 0.0, 1.0)
+        return score
 
     def _period_family_summary(self) -> dict[str, object]:
         cached = self._period_family_summary_cache
@@ -4071,7 +5139,7 @@ class EconomySimulation:
 
             for member in family_members:
                 age_years = age_years_by_household.get(member.id, 0.0)
-                family_income += max(0.0, member.last_income)
+                family_income += self._household_observed_income(member)
                 family_liquid += max(0.0, cash_balance_by_household.get(member.id, 0.0))
                 family_basket += max(0.0, essential_budget_by_household.get(member.id, 0.0))
                 if age_years < self.config.entry_age_years:
@@ -4468,6 +5536,59 @@ class EconomySimulation:
     def _capital_efficiency(self, capital: float) -> float:
         return 1.0 + math.log1p(max(0.0, capital) / self.config.capital_scale)
 
+    def _public_infrastructure_log_scale(self) -> float:
+        scale = max(1.0, self.config.government_public_capital_scale)
+        government = getattr(self, "government", None)
+        public_capital_stock = getattr(government, "public_capital_stock", 0.0)
+        return math.log1p(max(0.0, public_capital_stock) / scale)
+
+    def _public_infrastructure_productivity_multiplier(self) -> float:
+        gain = max(0.0, self.config.government_public_capital_productivity_gain)
+        return 1.0 + gain * self._public_infrastructure_log_scale()
+
+    def _public_infrastructure_transport_cost_multiplier(self) -> float:
+        gain = max(0.0, self.config.government_public_capital_transport_gain)
+        return clamp(1.0 - gain * self._public_infrastructure_log_scale(), 0.70, 1.0)
+
+    def _investment_knowledge_multiplier(self) -> float:
+        active_households = self._active_households()
+        if not active_households:
+            return 1.0
+        adult_households = [
+            household
+            for household in active_households
+            if self._household_age_years(household) >= self.config.entry_age_years
+        ]
+        labor_force_households = [
+            household
+            for household in active_households
+            if household.alive and self._household_labor_capacity(household) > 0.0
+        ]
+        university_completion_share = (
+            sum(1 for household in adult_households if self._household_has_university_credential(household))
+            / max(1, len(adult_households))
+        )
+        skilled_labor_share = (
+            sum(1 for household in labor_force_households if self._household_has_university_credential(household))
+            / max(1, len(labor_force_households))
+        )
+        knowledge_share = clamp(
+            self.config.firm_investment_knowledge_university_weight * university_completion_share
+            + self.config.firm_investment_knowledge_skill_weight * skilled_labor_share,
+            0.0,
+            1.0,
+        )
+        return clamp(
+            self.config.firm_investment_knowledge_floor
+            + (
+                self.config.firm_investment_knowledge_ceiling
+                - self.config.firm_investment_knowledge_floor
+            )
+            * math.sqrt(knowledge_share),
+            self.config.firm_investment_knowledge_floor,
+            self.config.firm_investment_knowledge_ceiling,
+        )
+
     def _is_education_sector(self, sector_key: str) -> bool:
         return sector_key in ("school", "university")
 
@@ -4553,6 +5674,37 @@ class EconomySimulation:
             max(1.0, capacity),
         )
 
+    def _firm_inventory_buffer_multiplier(self, firm: Firm) -> float:
+        return clamp(
+            1.10 - 0.18 * (firm.inventory_aversion - 1.0),
+            0.70,
+            1.45,
+        )
+
+    def _firm_target_inventory_units(self, firm: Firm, expected_sales: float) -> float:
+        if self._is_education_sector(firm.sector):
+            return self._education_service_target_units(firm, expected_sales)
+        spec = SECTOR_BY_KEY[firm.sector]
+        if spec.target_inventory_ratio <= 0.0:
+            return 0.0
+        return max(
+            1.0,
+            max(0.0, expected_sales) * spec.target_inventory_ratio * self._firm_inventory_buffer_multiplier(firm),
+        )
+
+    def _firm_desired_output_from_expected_sales(self, firm: Firm, expected_sales: float) -> float:
+        target_inventory = self._firm_target_inventory_units(firm, expected_sales)
+        return max(0.0, max(0.0, expected_sales) + target_inventory - max(0.0, firm.inventory))
+
+    def _workers_needed_for_units(
+        self,
+        units: float,
+        effective_productivity: float,
+        *,
+        productivity_floor: float = 0.1,
+    ) -> int:
+        return max(1, math.ceil(max(0.0, units) / max(productivity_floor, effective_productivity)))
+
     def _education_entry_package_estimate(
         self,
         spec,
@@ -4628,14 +5780,22 @@ class EconomySimulation:
         }
 
     def _firm_effective_productivity(self, firm: Firm) -> float:
+        infrastructure_multiplier = self._public_infrastructure_productivity_multiplier()
         if self._is_education_sector(firm.sector):
             return max(
                 0.5,
                 firm.productivity
                 * firm.technology
-                * (0.92 + 0.08 * self._capital_efficiency(firm.capital)),
+                * (0.92 + 0.08 * self._capital_efficiency(firm.capital))
+                * infrastructure_multiplier,
             )
-        return max(0.1, firm.productivity * firm.technology * self._capital_efficiency(firm.capital))
+        return max(
+            0.1,
+            firm.productivity
+            * firm.technology
+            * self._capital_efficiency(firm.capital)
+            * infrastructure_multiplier,
+        )
 
     def _firm_costing_units(self, firm: Firm, realized_output: float) -> float:
         if self._is_education_sector(firm.sector):
@@ -4661,15 +5821,80 @@ class EconomySimulation:
 
     def _observed_sector_demand_signal(self, spec_key: str, use_current_period: bool = False) -> float:
         if use_current_period:
-            budget_units = self._period_sector_budget_demand_units.get(spec_key, 0.0)
-            potential_units = self._period_sector_potential_demand_units.get(spec_key, 0.0)
+            sales_units = self._period_sector_sales_units.get(spec_key, 0.0)
+            revealed_unmet_units = self._period_sector_revealed_unmet_units.get(spec_key, 0.0)
         else:
-            budget_units = self._last_sector_budget_demand_units.get(spec_key, 0.0)
-            potential_units = self._last_sector_potential_demand_units.get(spec_key, 0.0)
-        # This signal is meant to capture sector-wide solvent desire, not realized
-        # sales. Otherwise one firm's bad pricing would incorrectly shrink the
-        # perceived size of the whole market.
-        return max(0.0, 0.80 * budget_units + 0.20 * potential_units)
+            sales_units = self._recent_sector_signal_average(
+                self._sector_sales_history,
+                spec_key,
+                fallback=self._last_sector_sales_units.get(spec_key, 0.0),
+            )
+            revealed_unmet_units = self._recent_sector_signal_average(
+                self._sector_revealed_unmet_history,
+                spec_key,
+                fallback=self._last_sector_revealed_unmet_units.get(spec_key, 0.0),
+            )
+        shortage_visibility = 0.55
+        if spec_key in ESSENTIAL_SECTOR_KEYS:
+            shortage_visibility = 0.90
+        elif spec_key in MERIT_SECTOR_KEYS:
+            shortage_visibility = 0.75
+        # Firms do not observe the whole latent market. They see realized sales
+        # plus shoppers with money leaving empty-handed after trying to buy.
+        return max(0.0, sales_units + shortage_visibility * revealed_unmet_units)
+
+    def _sector_revealed_shortage_signal(self, sector_key: str, use_current_period: bool = False) -> float:
+        if use_current_period:
+            sales_units = self._period_sector_sales_units.get(sector_key, 0.0)
+            revealed_unmet_units = self._period_sector_revealed_unmet_units.get(sector_key, 0.0)
+        else:
+            sales_units = self._recent_sector_signal_average(
+                self._sector_sales_history,
+                sector_key,
+                fallback=self._last_sector_sales_units.get(sector_key, 0.0),
+            )
+            revealed_unmet_units = self._recent_sector_signal_average(
+                self._sector_revealed_unmet_history,
+                sector_key,
+                fallback=self._last_sector_revealed_unmet_units.get(sector_key, 0.0),
+            )
+        denominator = max(1.0, sales_units + revealed_unmet_units)
+        return clamp(revealed_unmet_units / denominator, 0.0, 1.0)
+
+    def _sector_revealed_expansion_pressure(self, sector_key: str, use_current_period: bool = False) -> float:
+        if use_current_period:
+            sales_units = self._period_sector_sales_units.get(sector_key, 0.0)
+            revealed_unmet_units = self._period_sector_revealed_unmet_units.get(sector_key, 0.0)
+        else:
+            sales_units = self._recent_sector_signal_average(
+                self._sector_sales_history,
+                sector_key,
+                fallback=self._last_sector_sales_units.get(sector_key, 0.0),
+            )
+            revealed_unmet_units = self._recent_sector_signal_average(
+                self._sector_revealed_unmet_history,
+                sector_key,
+                fallback=self._last_sector_revealed_unmet_units.get(sector_key, 0.0),
+            )
+        if sales_units <= 0.0 and revealed_unmet_units <= 0.0:
+            return 0.0
+        shortage_share = revealed_unmet_units / max(1.0, sales_units + revealed_unmet_units)
+        walkaway_intensity = revealed_unmet_units / max(1.0, sales_units)
+        return clamp(0.65 * shortage_share + 0.35 * walkaway_intensity, 0.0, 1.5)
+
+    def _firm_revealed_growth_pressure(self, firm: Firm, use_current_period: bool = False) -> float:
+        sector_pressure = self._sector_revealed_expansion_pressure(
+            firm.sector,
+            use_current_period=use_current_period,
+        )
+        if sector_pressure <= 0.0:
+            return 0.0
+        sell_through = clamp((self._firm_recent_sell_through(firm) - 0.55) / 0.45, 0.0, 1.25)
+        cash_cover = clamp(self._firm_cash_cover_ratio(firm) / 1.75, 0.0, 1.25)
+        growth_pressure = sector_pressure * (0.45 + 0.55 * sell_through) * (0.35 + 0.65 * cash_cover)
+        if firm.last_profit < 0.0:
+            growth_pressure *= 0.75
+        return clamp(growth_pressure, 0.0, 1.5)
 
     def _baseline_demand(self, spec_key: str, use_current_period: bool = False) -> float:
         cache_key = (spec_key, use_current_period, self.period)
@@ -5098,6 +6323,24 @@ class EconomySimulation:
         firm.price_aggressiveness = blend(firm.price_aggressiveness, peer.price_aggressiveness, 0.50, 1.70)
         firm.cash_conservatism = blend(firm.cash_conservatism, peer.cash_conservatism, 0.50, 1.70)
         firm.market_share_ambition = blend(firm.market_share_ambition, peer.market_share_ambition, 0.50, 1.70)
+        firm.expansion_credit_appetite = blend(
+            firm.expansion_credit_appetite,
+            peer.expansion_credit_appetite,
+            0.55,
+            1.75,
+        )
+        firm.stability_sensitivity = blend(
+            firm.stability_sensitivity,
+            peer.stability_sensitivity,
+            0.55,
+            1.75,
+        )
+        firm.investment_animal_spirits = blend(
+            firm.investment_animal_spirits,
+            peer.investment_animal_spirits,
+            0.55,
+            1.75,
+        )
         firm.forecast_caution = blend(firm.forecast_caution, peer.forecast_caution, 0.60, 1.85)
         firm.demand_elasticity = blend(firm.demand_elasticity, peer.demand_elasticity, 0.45, 2.75)
         firm.wage_offer = max(
@@ -5121,9 +6364,17 @@ class EconomySimulation:
         firm.fixed_overhead = max(0.0, peer.fixed_overhead * self.rng.uniform(0.92, 1.08))
         firm.sales_history = [
             max(0.0, sale * self.rng.uniform(0.90, 1.10))
-            for sale in peer.sales_history[-6:]
+            for sale in self._firm_memory_slice(peer)
         ] or [max(1.0, peer.last_sales)]
-        firm.last_expected_sales = max(1.0, sum(firm.sales_history) / len(firm.sales_history))
+        firm.expected_sales_history = [
+            max(0.0, sale * self.rng.uniform(0.90, 1.10))
+            for sale in (peer.expected_sales_history or [max(1.0, peer.last_expected_sales)])
+        ]
+        firm.production_history = [
+            max(0.0, output * self.rng.uniform(0.90, 1.10))
+            for output in (peer.production_history or [max(0.0, peer.last_production)])
+        ]
+        firm.last_expected_sales = self._smoothed_expected_sales_reference(firm)
         firm.forecast_error_belief = clamp(
             0.75 * firm.forecast_error_belief + 0.25 * peer.forecast_error_belief,
             0.03,
@@ -5164,9 +6415,17 @@ class EconomySimulation:
         )
         firm.sales_history = [
             max(0.0, sale * self.rng.uniform(0.85, 1.15))
-            for sale in firm.sales_history[-6:]
+            for sale in self._firm_memory_slice(firm)
         ] or [max(1.0, firm.last_sales)]
-        firm.last_expected_sales = max(1.0, sum(firm.sales_history) / len(firm.sales_history))
+        firm.expected_sales_history = [
+            max(0.0, sale * self.rng.uniform(0.85, 1.15))
+            for sale in (firm.expected_sales_history or [max(1.0, firm.last_expected_sales)])
+        ]
+        firm.production_history = [
+            max(0.0, output * self.rng.uniform(0.85, 1.15))
+            for output in (firm.production_history or [max(0.0, firm.last_production)])
+        ]
+        firm.last_expected_sales = self._smoothed_expected_sales_reference(firm)
         firm.loss_streak = 0
 
     def _adapt_losing_firm(self, firm: Firm) -> None:
@@ -5186,6 +6445,9 @@ class EconomySimulation:
             "price_aggressiveness": clamp(self.rng.uniform(0.70, 1.40), 0.50, 1.70),
             "cash_conservatism": clamp(self.rng.uniform(0.70, 1.40), 0.50, 1.70),
             "market_share_ambition": clamp(self.rng.uniform(0.70, 1.40), 0.50, 1.70),
+            "expansion_credit_appetite": clamp(self.rng.uniform(0.70, 1.45), 0.55, 1.75),
+            "stability_sensitivity": clamp(self.rng.uniform(0.70, 1.40), 0.55, 1.75),
+            "investment_animal_spirits": clamp(self.rng.uniform(0.70, 1.40), 0.55, 1.75),
             "forecast_caution": clamp(self.rng.uniform(0.75, 1.50), 0.60, 1.85),
         }
 
@@ -5301,11 +6563,8 @@ class EconomySimulation:
         )
 
     def _firm_recent_sales_momentum(self, firm: Firm) -> float:
-        if len(firm.sales_history) < 4:
-            return 0.0
-        recent_window = firm.sales_history[-3:]
-        prior_window = firm.sales_history[-6:-3] or firm.sales_history[:-3]
-        if not prior_window:
+        recent_window, prior_window = self._firm_recent_prior_sales_windows(firm)
+        if len(recent_window) < 3 or not prior_window:
             return 0.0
         prior_avg = sum(prior_window) / len(prior_window)
         recent_avg = sum(recent_window) / len(recent_window)
@@ -5315,8 +6574,11 @@ class EconomySimulation:
         learning_maturity = self._firm_learning_maturity(firm)
         uncertainty = self._firm_forecast_uncertainty(firm)
         caution = clamp(firm.forecast_caution, 0.60, 1.85)
-        demand_realization = firm.last_sales / max(1.0, firm.last_expected_sales)
-        sell_through = firm.last_sales / max(1.0, firm.last_production)
+        smoothed_sales = self._smoothed_sales_reference(firm)
+        smoothed_expected = self._smoothed_expected_sales_reference(firm)
+        smoothed_production = self._smoothed_production_reference(firm)
+        demand_realization = smoothed_sales / max(1.0, smoothed_expected)
+        sell_through = smoothed_sales / max(1.0, smoothed_production)
         inventory_ratio = firm.inventory / max(1.0, firm.target_inventory)
         sales_momentum = self._firm_recent_sales_momentum(firm)
         readiness = clamp(
@@ -5362,9 +6624,11 @@ class EconomySimulation:
         return sorted({base_candidate, cautious_hike})
 
     def _firm_rejection_signal(self, firm: Firm) -> float:
-        expected_sales = max(1.0, firm.last_expected_sales)
+        expected_sales = self._smoothed_expected_sales_reference(firm)
+        smoothed_sales = self._smoothed_sales_reference(firm)
+        smoothed_production = self._smoothed_production_reference(firm)
         expectation_shortfall = clamp(
-            (expected_sales - firm.last_sales) / expected_sales,
+            (expected_sales - smoothed_sales) / expected_sales,
             0.0,
             1.5,
         )
@@ -5372,22 +6636,20 @@ class EconomySimulation:
         inventory_pressure = clamp((inventory_ratio - 1.0) / 1.5, 0.0, 1.0)
 
         recent_sales_drop = 0.0
-        if len(firm.sales_history) >= 4:
-            recent_window = firm.sales_history[-3:]
-            prior_window = firm.sales_history[-6:-3] or firm.sales_history[:-3]
-            if prior_window:
-                prior_avg = sum(prior_window) / len(prior_window)
-                recent_avg = sum(recent_window) / len(recent_window)
-                recent_sales_drop = clamp(
-                    (prior_avg - recent_avg) / max(1.0, prior_avg),
-                    0.0,
-                    1.5,
-                )
+        recent_window, prior_window = self._firm_recent_prior_sales_windows(firm)
+        if len(recent_window) >= 3 and prior_window:
+            prior_avg = sum(prior_window) / len(prior_window)
+            recent_avg = sum(recent_window) / len(recent_window)
+            recent_sales_drop = clamp(
+                (prior_avg - recent_avg) / max(1.0, prior_avg),
+                0.0,
+                1.5,
+            )
 
         unsold_pressure = 0.0
-        if firm.last_production > 0.0:
+        if smoothed_production > 0.0:
             unsold_pressure = clamp(
-                (firm.last_production - firm.last_sales) / max(1.0, firm.last_production),
+                (smoothed_production - smoothed_sales) / max(1.0, smoothed_production),
                 0.0,
                 1.0,
             )
@@ -5402,16 +6664,31 @@ class EconomySimulation:
         )
 
     def _sector_public_fragility_signal(self, sector_key: str) -> float:
-        last_budget_units = getattr(self, "_last_sector_budget_demand_units", {})
-        last_sales_units = getattr(self, "_last_sector_sales_units", {})
-        prior_sales_units_map = getattr(self, "_prior_sector_sales_units", {})
-        budget_units = last_budget_units.get(sector_key, 0.0)
-        sales_units = last_sales_units.get(sector_key, 0.0)
-        prior_sales_units = prior_sales_units_map.get(sector_key, 0.0)
+        sales_units = self._recent_sector_signal_average(
+            self._sector_sales_history,
+            sector_key,
+            fallback=getattr(self, "_last_sector_sales_units", {}).get(sector_key, 0.0),
+        )
+        revealed_unmet_units = self._recent_sector_signal_average(
+            self._sector_revealed_unmet_history,
+            sector_key,
+            fallback=getattr(self, "_last_sector_revealed_unmet_units", {}).get(sector_key, 0.0),
+        )
+        sales_history = self._sector_sales_history.get(sector_key, [])
+        prior_sales_units = 0.0
+        if len(sales_history) >= 2:
+            midpoint = max(1, len(sales_history) // 2)
+            prior_sales_units = sum(sales_history[:-midpoint]) / max(1, len(sales_history[:-midpoint]))
+        elif sales_history:
+            prior_sales_units = sales_history[0]
 
         walkaway_rate = 0.0
-        if budget_units > 0.0:
-            walkaway_rate = clamp((budget_units - sales_units) / budget_units, 0.0, 1.5)
+        if sales_units > 0.0 or revealed_unmet_units > 0.0:
+            walkaway_rate = clamp(
+                revealed_unmet_units / max(1.0, sales_units + revealed_unmet_units),
+                0.0,
+                1.5,
+            )
 
         volume_drop = 0.0
         if prior_sales_units > 0.0:
@@ -5424,16 +6701,20 @@ class EconomySimulation:
         return clamp(0.60 * walkaway_rate + 0.40 * volume_drop, 0.0, 1.5)
 
     def _economy_public_fragility_signal(self) -> float:
-        if not self.history:
+        snapshots = self._recent_snapshots()
+        if not snapshots:
             return 0.0
 
-        last_snapshot = self.history[-1]
+        last_snapshot = snapshots[-1]
         unemployment_stress = clamp(
             (last_snapshot.unemployment_rate - self.config.target_unemployment) / 0.35,
             0.0,
             1.5,
         )
-        demographic_loss = max(0.0, last_snapshot.deaths - last_snapshot.births) / max(1, last_snapshot.population)
+        average_births = sum(snapshot.births for snapshot in snapshots) / len(snapshots)
+        average_deaths = sum(snapshot.deaths for snapshot in snapshots) / len(snapshots)
+        average_population = sum(snapshot.population for snapshot in snapshots) / len(snapshots)
+        demographic_loss = max(0.0, average_deaths - average_births) / max(1, average_population)
         demographic_stress = clamp(
             demographic_loss * self.config.periods_per_year * 4.0,
             0.0,
@@ -5441,8 +6722,8 @@ class EconomySimulation:
         )
 
         population_drop = 0.0
-        if len(self.history) >= 2:
-            prior_snapshot = self.history[-2]
+        if len(snapshots) >= 2:
+            prior_snapshot = snapshots[0]
             if prior_snapshot.population > 0:
                 population_drop = clamp(
                     (prior_snapshot.population - last_snapshot.population) / prior_snapshot.population * 10.0,
@@ -5457,21 +6738,32 @@ class EconomySimulation:
         )
 
     def _social_survival_fragility_signal(self, sector_key: str) -> float:
-        if not self.history:
+        snapshots = self._recent_snapshots()
+        if not snapshots:
             return 0.0
 
-        last_snapshot = self.history[-1]
-        essential_shortfall = clamp(1.0 - last_snapshot.essential_fulfillment_rate, 0.0, 1.5)
-        family_stress = clamp(last_snapshot.families_income_below_basket_share, 0.0, 1.5)
-        mortality_rate = last_snapshot.deaths / max(1, last_snapshot.population)
+        last_snapshot = snapshots[-1]
+        essential_shortfall = clamp(
+            1.0 - sum(snapshot.essential_fulfillment_rate for snapshot in snapshots) / len(snapshots),
+            0.0,
+            1.5,
+        )
+        family_stress = clamp(
+            sum(snapshot.families_income_below_basket_share for snapshot in snapshots) / len(snapshots),
+            0.0,
+            1.5,
+        )
+        average_deaths = sum(snapshot.deaths for snapshot in snapshots) / len(snapshots)
+        average_population = sum(snapshot.population for snapshot in snapshots) / len(snapshots)
+        mortality_rate = average_deaths / max(1, average_population)
         mortality_stress = clamp(
             mortality_rate * self.config.periods_per_year / 0.15,
             0.0,
             1.5,
         )
         population_drop = 0.0
-        if len(self.history) >= 2:
-            prior_snapshot = self.history[-2]
+        if len(snapshots) >= 2:
+            prior_snapshot = snapshots[0]
             if prior_snapshot.population > 0:
                 population_drop = clamp(
                     (prior_snapshot.population - last_snapshot.population) / prior_snapshot.population * 10.0,
@@ -5561,22 +6853,126 @@ class EconomySimulation:
         return retention, 0.0
 
     def _firm_demand_share_anchor(self, firm: Firm, market_share: float) -> float:
-        if firm.last_market_share > 0.0:
-            learned_share = firm.last_market_share
-        else:
+        learned_share = max(0.0, self._smoothed_sales_reference(firm)) / max(
+            1.0,
+            self._baseline_demand(firm.sector, use_current_period=True),
+        )
+        if learned_share <= 0.0:
             learned_share = market_share
         learning_maturity = self._firm_learning_maturity(firm)
         learned_weight = 0.30 + 0.50 * learning_maturity
         blended_share = learned_weight * learned_share + (1.0 - learned_weight) * market_share
         return clamp(blended_share, max(0.01, 0.15 * market_share), 0.95)
 
-    def _sales_anchor(self, firm: Firm, sector_total_demand: float, market_share: float) -> float:
-        share_anchor = self._firm_demand_share_anchor(firm, market_share)
-        market_anchor = max(1.0, sector_total_demand * share_anchor)
-        sales_memory = self._smoothed_sales_reference(firm)
+    def _firm_recent_sell_through(self, firm: Firm) -> float:
+        smoothed_sales = self._smoothed_sales_reference(firm)
+        expected_reference = max(
+            1.0,
+            self._smoothed_expected_sales_reference(firm),
+            self._smoothed_production_reference(firm),
+            smoothed_sales,
+        )
+        return clamp(smoothed_sales / expected_reference, 0.0, 1.25)
+
+    def _firm_cash_cover_ratio(self, firm: Firm) -> float:
+        operating_burn = (
+            firm.last_wage_bill
+            + firm.last_input_cost
+            + firm.last_transport_cost
+            + firm.last_fixed_overhead
+            + firm.last_interest_cost
+        )
+        if operating_burn <= 0.0:
+            operating_burn = (
+                max(1, firm.last_worker_count) * max(0.1, firm.wage_offer)
+                + max(0.0, firm.fixed_overhead)
+                + max(0.0, firm.capital) * self.config.depreciation_rate
+            )
+        return firm.cash / max(1.0, operating_burn)
+
+    def _firm_capturable_sales_cap(self, firm: Firm, sector_total_demand: float, market_share: float) -> float:
+        sales_memory = max(1.0, self._smoothed_sales_reference(firm))
+        if sector_total_demand <= 0.0:
+            return sales_memory
+
         learning_maturity = self._firm_learning_maturity(firm)
-        market_weight = 0.85 - 0.20 * learning_maturity
-        return max(1.0, market_weight * market_anchor + (1.0 - market_weight) * sales_memory)
+        sell_through = self._firm_recent_sell_through(firm)
+        cash_cover = clamp(self._firm_cash_cover_ratio(firm), 0.0, 3.0)
+        ambition_bonus = clamp(firm.market_share_ambition - 1.0, 0.0, 0.70)
+        forecast_penalty = clamp(firm.forecast_error_belief, 0.0, 1.25)
+        revealed_shortage = self._sector_revealed_shortage_signal(firm.sector)
+        realized_share = sales_memory / max(1.0, sector_total_demand)
+        share_gap = max(0.0, market_share - realized_share)
+        expansion_allowance = (
+            0.02
+            + 0.06 * learning_maturity
+            + 0.06 * max(0.0, sell_through - 0.70)
+            + 0.03 * cash_cover
+            + 0.04 * ambition_bonus
+            + 0.15 * min(share_gap, 0.20)
+            + 0.10 * revealed_shortage * max(0.0, sell_through - 0.55)
+            - 0.05 * forecast_penalty
+            - 0.08 * max(0.0, 0.85 - sell_through)
+        )
+        expansion_allowance = clamp(expansion_allowance, 0.01, 0.18)
+        capturable_share = clamp(
+            realized_share + min(share_gap, expansion_allowance),
+            max(0.0025, realized_share),
+            min(0.75, max(realized_share + 0.01, market_share)),
+        )
+        capturable_market_sales = max(1.0, sector_total_demand * capturable_share)
+
+        effective_productivity = max(1.0, self._firm_effective_productivity(firm))
+        staffed_capacity = effective_productivity * max(1, firm.last_worker_count)
+        proven_scale = max(
+            sales_memory,
+            min(max(1.0, self._smoothed_production_reference(firm)), max(1.0, staffed_capacity)),
+        )
+        max_growth_rate = clamp(
+            0.18
+            + 0.32 * max(0.0, sell_through - 0.65)
+            + 0.08 * learning_maturity
+            + 0.06 * ambition_bonus
+            + 0.05 * cash_cover
+            + 0.18 * revealed_shortage * max(0.0, sell_through - 0.55)
+            - 0.10 * forecast_penalty,
+            0.15,
+            0.90,
+        )
+        growth_limited_sales = max(1.0, proven_scale * (1.0 + max_growth_rate))
+        return max(1.0, min(capturable_market_sales, growth_limited_sales))
+
+    def _firm_effective_supply_signal(self, firm: Firm, sector_total_demand: float | None = None) -> float:
+        sales_memory = max(0.0, self._smoothed_sales_reference(firm))
+        sell_through = self._firm_recent_sell_through(firm)
+        proven_sales = max(
+            self._smoothed_sales_reference(firm),
+            sales_memory,
+            self._smoothed_expected_sales_reference(firm) * sell_through,
+        )
+        if sector_total_demand is None:
+            sector_total_demand = max(
+                1.0,
+                self._baseline_demand(firm.sector, use_current_period=True),
+            )
+        supply_cap = self._firm_capturable_sales_cap(
+            firm,
+            sector_total_demand,
+            max(0.05, firm.last_market_share),
+        )
+        return max(0.0, min(proven_sales, supply_cap))
+
+    def _sales_anchor(self, firm: Firm, sector_total_demand: float, market_share: float) -> float:
+        sales_memory = self._smoothed_sales_reference(firm)
+        capturable_sales_cap = self._firm_capturable_sales_cap(
+            firm,
+            sector_total_demand,
+            self._firm_demand_share_anchor(firm, market_share),
+        )
+        learning_maturity = self._firm_learning_maturity(firm)
+        market_weight = 0.52 - 0.10 * learning_maturity + 0.06 * max(0.0, firm.market_share_ambition - 1.0)
+        market_weight = clamp(market_weight, 0.35, 0.60)
+        return max(1.0, sales_memory + market_weight * (capturable_sales_cap - sales_memory))
 
     def _expected_demand_for_price(
         self,
@@ -5655,14 +7051,14 @@ class EconomySimulation:
         return max(0.0, expected_sales * prudent_share)
 
     def _update_firm_demand_learning(self, firm: Firm) -> None:
-        expected_sales = max(0.0, firm.last_expected_sales)
+        expected_sales = max(0.0, self._smoothed_expected_sales_reference(firm))
         if expected_sales <= 0.0:
             return
 
         learning_maturity = self._firm_learning_maturity(firm)
         learning_scale = 0.30 + 0.70 * learning_maturity
         prior_elasticity = self._sector_demand_elasticity_prior(firm.sector)
-        realization = firm.last_sales / max(1.0, expected_sales)
+        realization = self._smoothed_sales_reference(firm) / max(1.0, expected_sales)
         inventory_ratio = firm.inventory / max(1.0, firm.target_inventory)
         target_elasticity = firm.demand_elasticity
         hike_sensitivity = self._firm_price_hike_sensitivity(firm)
@@ -5809,6 +7205,8 @@ class EconomySimulation:
         return entrepreneurs
 
     def _initial_sector_firm_count(self, sector_key: str) -> int:
+        if sector_key == "public_administration":
+            return 0
         if sector_key == "school":
             return max(1, self.config.initial_private_school_firms)
         if sector_key == "university":
@@ -5850,13 +7248,19 @@ class EconomySimulation:
         effective_productivity = self._firm_effective_productivity(firm)
         if self._is_education_sector(spec.key):
             target_service_units = self._education_service_target_units(firm, expected_sales)
-            firm.desired_workers = max(1, math.ceil(target_service_units / max(0.25, effective_productivity)))
+            firm.desired_workers = self._workers_needed_for_units(
+                target_service_units,
+                effective_productivity,
+                productivity_floor=0.25,
+            )
             firm.target_inventory = target_service_units
             firm.inventory = min(max(0.0, firm.inventory), target_service_units)
+            firm.inventory_batches = []
         else:
-            desired_output = expected_sales + firm.inventory
-            firm.desired_workers = max(1, math.ceil(desired_output / max(0.1, effective_productivity)))
-            firm.target_inventory = firm.inventory
+            firm.target_inventory = self._firm_target_inventory_units(firm, expected_sales)
+            desired_output = self._firm_desired_output_from_expected_sales(firm, expected_sales)
+            firm.desired_workers = self._workers_needed_for_units(desired_output, effective_productivity)
+            self._ensure_inventory_batches(firm)
         firm.last_worker_count = firm.desired_workers
         firm.last_sales = expected_sales
         firm.last_revenue = expected_sales * firm.price
@@ -5868,6 +7272,7 @@ class EconomySimulation:
         firm.last_capital_charge = firm.capital * self.config.depreciation_rate
         firm.last_total_cost = (
             firm.last_wage_bill
+            + firm.last_wage_bill * self._government_payroll_tax_rate()
             + firm.last_input_cost
             + firm.last_transport_cost
             + firm.last_fixed_overhead
@@ -5877,6 +7282,8 @@ class EconomySimulation:
             firm.last_total_cost / max(1.0, expected_sales)
         )
         firm.last_expected_sales = expected_sales
+        firm.expected_sales_history = [expected_sales]
+        firm.production_history = [firm.last_production]
         firm.last_profit = (
             firm.last_revenue
             - firm.last_total_cost
@@ -5921,7 +7328,7 @@ class EconomySimulation:
                     self.config.technology_cap,
                 )
                 firm.capital *= capital_boost
-                firm.inventory = max(firm.inventory, target_sales * spec.target_inventory_ratio)
+                firm.inventory = max(firm.inventory, self._firm_target_inventory_units(firm, target_sales))
                 firm.cash = max(
                     firm.cash,
                     self._entry_cash_budget(
@@ -6147,6 +7554,7 @@ class EconomySimulation:
         last_fixed_overhead = fixed_overhead
         last_total_cost = (
             last_wage_bill
+            + last_wage_bill * self._government_payroll_tax_rate()
             + last_input_cost
             + last_transport_cost
             + last_fixed_overhead
@@ -6194,6 +7602,9 @@ class EconomySimulation:
             last_unit_cost=unit_cost,
             last_market_share=0.0,
             sales_history=[expected_sales],
+            expected_sales_history=[expected_sales],
+            production_history=[expected_sales],
+            inventory_batches=[] if self._is_education_sector(spec.key) else [max(0.0, inventory)],
             last_expected_sales=expected_sales,
             market_fragility_belief=clamp(
                 0.55 * self._sector_public_fragility_signal(spec.key)
@@ -6234,7 +7645,9 @@ class EconomySimulation:
             for firm, competitiveness in competitiveness_weights:
                 learning_maturity = self._firm_learning_maturity(firm)
                 effective_productivity = self._firm_effective_productivity(firm)
-                previous_output_per_worker = firm.last_production / max(1, firm.last_worker_count)
+                sell_through = self._firm_recent_sell_through(firm)
+                revealed_growth_pressure = self._firm_revealed_growth_pressure(firm)
+                previous_output_per_worker = self._smoothed_production_reference(firm) / max(1, firm.last_worker_count)
                 productivity_gain_ratio = clamp(
                     (effective_productivity - previous_output_per_worker) / max(0.1, previous_output_per_worker),
                     -0.25,
@@ -6243,15 +7656,7 @@ class EconomySimulation:
                 market_share = competitiveness / total_competitiveness
                 sales_anchor = self._sales_anchor(firm, sector_total_demand, market_share)
                 baseline_demand = max(1.0, sales_anchor)
-                inventory_target_multiplier = clamp(
-                    1.10 - 0.18 * (firm.inventory_aversion - 1.0),
-                    0.70,
-                    1.25,
-                )
-                preliminary_inventory_target = max(
-                    1.0,
-                    baseline_demand * spec.target_inventory_ratio * inventory_target_multiplier,
-                )
+                preliminary_inventory_target = self._firm_target_inventory_units(firm, baseline_demand)
                 preliminary_desired_output = max(0.0, baseline_demand + preliminary_inventory_target - firm.inventory)
                 preliminary_desired_workers = max(1, math.ceil(preliminary_desired_output / effective_productivity))
                 vacancy_ratio = max(0.0, preliminary_desired_workers - firm.last_worker_count) / max(
@@ -6296,6 +7701,34 @@ class EconomySimulation:
                         * max(0.0, wage_room)
                     )
                     wage_adjustment += 0.05 * max(0.0, productivity_gain_ratio) * max(0.0, living_wage_gap)
+                wage_adjustment += (
+                    0.05
+                    * self.config.firm_revealed_shortage_capacity_weight
+                    * revealed_growth_pressure
+                    * max(0.0, wage_room)
+                )
+                profitable_rejection_target = self._profitable_labor_offer_rejection_wage_target(
+                    firm,
+                    baseline_demand=baseline_demand,
+                    effective_productivity=effective_productivity,
+                    target_workers=preliminary_desired_workers,
+                )
+                if profitable_rejection_target is not None:
+                    rejection_pressure = clamp(
+                        firm.last_labor_offer_rejections / max(1, preliminary_desired_workers),
+                        0.0,
+                        1.0,
+                    )
+                    rejection_gap = max(
+                        0.0,
+                        profitable_rejection_target - firm.wage_offer,
+                    ) / max(1.0, firm.wage_offer)
+                    wage_adjustment += min(
+                        self.config.labor_offer_rejection_response_cap,
+                        rejection_gap
+                        * self.config.labor_offer_rejection_catchup_share
+                        * (0.35 + 0.65 * rejection_pressure),
+                    )
                 if firm.cash < firm.last_wage_bill * 0.5:
                     wage_adjustment -= 0.04
                 wage_adjustment = clamp(wage_adjustment, -0.12, 0.24) * (0.35 + 0.65 * learning_maturity)
@@ -6352,7 +7785,6 @@ class EconomySimulation:
                         effective_price,
                         reference_price,
                     )
-                    candidate_profit = (effective_price - variable_unit_cost) * expected_sales - fixed_cost
                     retention, market_hazard = self._candidate_market_retention(
                         firm,
                         effective_price,
@@ -6365,7 +7797,13 @@ class EconomySimulation:
                         reference_price,
                         market_hazard,
                     )
-                    candidate_profit = (effective_price - variable_unit_cost) * prudent_sales - fixed_cost
+                    candidate_profit = self._candidate_total_profit(
+                        firm,
+                        prudent_sales,
+                        effective_price,
+                        variable_unit_cost,
+                        fixed_cost,
+                    )
                     future_sales = clamp(prudent_sales * retention, 0.0, sector_total_demand)
                     future_market_value = future_sales * max(0.0, effective_price - variable_unit_cost)
                     candidate_objective = self._candidate_price_objective(
@@ -6530,7 +7968,7 @@ class EconomySimulation:
                 if self._is_education_sector(spec.key):
                     target_inventory = self._education_service_target_units(firm, best_expected_sales)
                 else:
-                    target_inventory = max(1.0, best_expected_sales * spec.target_inventory_ratio)
+                    target_inventory = self._firm_target_inventory_units(firm, best_expected_sales)
                 if self._in_startup_grace() and spec.key in ESSENTIAL_SECTOR_KEYS:
                     firm.desired_workers = max(1, len(firm.workers))
                     firm.target_inventory = max(firm.target_inventory, target_inventory, firm.inventory)
@@ -6540,19 +7978,14 @@ class EconomySimulation:
                     continue
                 if self._is_education_sector(spec.key):
                     desired_service_units = target_inventory
-                    firm.desired_workers = max(1, math.ceil(desired_service_units / max(0.25, effective_productivity)))
+                    firm.desired_workers = self._workers_needed_for_units(
+                        desired_service_units,
+                        effective_productivity,
+                        productivity_floor=0.25,
+                    )
                 else:
-                    desired_output = max(0.0, best_expected_sales + target_inventory - firm.inventory)
-                    firm.desired_workers = max(1, math.ceil(desired_output / effective_productivity))
-                firm.desired_workers = max(
-                    1,
-                    round(firm.employment_inertia * firm.last_worker_count + (1.0 - firm.employment_inertia) * firm.desired_workers),
-                )
-                if firm.last_worker_count > 0:
-                    worker_adjustment_limit = 0.05 + 0.25 * learning_maturity
-                    min_workers = max(1, math.floor(firm.last_worker_count * (1.0 - worker_adjustment_limit)))
-                    max_workers = max(1, math.ceil(firm.last_worker_count * (1.0 + worker_adjustment_limit)))
-                    firm.desired_workers = max(min_workers, min(max_workers, firm.desired_workers))
+                    desired_output = self._firm_desired_output_from_expected_sales(firm, best_expected_sales)
+                    firm.desired_workers = self._workers_needed_for_units(desired_output, effective_productivity)
                 firm.target_inventory = target_inventory
                 firm.price = chosen_price
                 firm.last_expected_sales = best_expected_sales
@@ -6573,6 +8006,8 @@ class EconomySimulation:
         for household in eligible_households:
             best_firm = None
             best_score = None
+            best_rejected_firm = None
+            best_rejected_score = None
             age_years = self._household_age_years(household)
             essential_candidates_exist = False
             if age_years < 30.0:
@@ -6596,12 +8031,12 @@ class EconomySimulation:
             for firm in firm_order:
                 if len(firm.workers) >= firm.desired_workers:
                     continue
-                if firm.wage_offer < household.reservation_wage:
-                    continue
                 if self._in_essential_protection() and essential_candidates_exist and firm.sector not in ESSENTIAL_SECTOR_KEYS:
                     continue
                 stability = firm.cash / max(1.0, firm.last_wage_bill + firm.price)
                 labor_capacity = self._worker_effective_labor_for_sector(household, firm.sector)
+                if labor_capacity <= 0.0:
+                    continue
                 profit_margin = firm.last_profit / max(1.0, firm.last_revenue, firm.last_sales * max(0.1, firm.price))
                 viability = clamp(
                     1.0
@@ -6616,6 +8051,11 @@ class EconomySimulation:
                     * labor_capacity
                     + age_bonus
                 )
+                if firm.wage_offer < household.reservation_wage:
+                    if best_rejected_score is None or score > best_rejected_score:
+                        best_rejected_score = score
+                        best_rejected_firm = firm
+                    continue
                 if best_score is None or score > best_score:
                     best_score = score
                     best_firm = firm
@@ -6623,6 +8063,8 @@ class EconomySimulation:
                 best_firm.workers.append(household.id)
                 household.employed_by = best_firm.id
                 household.employment_tenure = 0
+            elif best_rejected_firm is not None:
+                self._record_labor_offer_rejection(best_rejected_firm, household.reservation_wage)
 
     def _produce_and_pay_wages(self) -> None:
         for firm in self.firms:
@@ -6642,7 +8084,7 @@ class EconomySimulation:
                 # Education services are period capacity, not storable goods.
                 firm.inventory = output_units
             else:
-                firm.inventory += output_units
+                self._add_inventory_units(firm, output_units)
             self._period_production_units += output_units
             if firm.sector in ESSENTIAL_SECTOR_KEYS:
                 self._period_essential_production_units += output_units
@@ -6651,9 +8093,17 @@ class EconomySimulation:
             firm.last_wage_bill = wage_bill
             firm.cash -= wage_bill
             self._period_wages += wage_bill
+            payroll_tax = wage_bill * self._government_payroll_tax_rate()
+            if payroll_tax > 0.0:
+                firm.cash -= payroll_tax
+                self._record_government_tax_revenue(payroll_tax, "payroll")
 
             input_cost = output_units * firm.input_cost_per_unit
-            transport_cost = output_units * firm.transport_cost_per_unit
+            transport_cost = (
+                output_units
+                * firm.transport_cost_per_unit
+                * self._public_infrastructure_transport_cost_multiplier()
+            )
             fixed_overhead = firm.fixed_overhead
             capital_charge = firm.capital * self.config.depreciation_rate
             firm.last_input_cost = input_cost
@@ -6663,7 +8113,12 @@ class EconomySimulation:
             if output_units > 0.0:
                 costing_units = self._firm_costing_units(firm, output_units)
                 firm.last_unit_cost = (
-                    wage_bill + input_cost + transport_cost + fixed_overhead + capital_charge
+                    wage_bill
+                    + payroll_tax
+                    + input_cost
+                    + transport_cost
+                    + fixed_overhead
+                    + capital_charge
                 ) / costing_units
             nonwage_operating_cost = input_cost + transport_cost + fixed_overhead
             firm.cash -= nonwage_operating_cost
@@ -6672,11 +8127,19 @@ class EconomySimulation:
 
             for worker_id in workers:
                 household = self.households[worker_id]
-                household.wage_income += firm.wage_offer
-                household.last_income += firm.wage_offer
+                labor_tax = min(
+                    firm.wage_offer,
+                    firm.wage_offer * self._government_labor_tax_rate(firm.wage_offer),
+                )
+                net_wage = firm.wage_offer - labor_tax
+                household.wage_income += net_wage
+                household.last_income += net_wage
+                if labor_tax > 0.0:
+                    self._record_government_tax_revenue(labor_tax, "labor")
 
             self._cash_before_sales[firm.id] = firm.cash
 
+        self._pay_public_administration_wages()
         self._flush_pending_sector_payments()
 
     def _family_budget_profile(self, members: list[Household]) -> tuple[float, float, float, int]:
@@ -6846,6 +8309,7 @@ class EconomySimulation:
                 )
                 for sector_key in (spec.key for spec in SECTOR_SPECS)
             }
+        self._update_public_education_support_persistence(member, coverages_by_sector)
 
         food_coverage = coverages_by_sector["food"]
         housing_coverage = coverages_by_sector["housing"]
@@ -6909,19 +8373,28 @@ class EconomySimulation:
             family_basic_basket_cost=family_basic_basket_cost,
         )
 
+    def _update_public_education_support_persistence(
+        self,
+        household: Household,
+        coverages_by_sector: dict[str, float],
+    ) -> None:
+        school_signal = 1.0 if coverages_by_sector.get("school", 0.0) >= 0.60 else 0.0
+        university_signal = 1.0 if coverages_by_sector.get("university", 0.0) >= 0.55 else 0.0
+        household.public_school_support_persistence = clamp(
+            0.60 * household.public_school_support_persistence + 0.40 * school_signal,
+            0.0,
+            1.0,
+        )
+        household.public_university_support_persistence = clamp(
+            0.60 * household.public_university_support_persistence + 0.40 * university_signal,
+            0.0,
+            1.0,
+        )
+
     def _government_education_budget_base(self) -> float:
         if not self.config.government_enabled:
             return 0.0
-        last_gdp = self.history[-1].gdp_nominal if self.history else max(1.0, self._startup_goods_monetary_mass)
-        last_spending = 0.0
-        if self.history:
-            last_spending = (
-                self.history[-1].government_transfers
-                + self.history[-1].government_procurement_spending
-                + self.history[-1].government_education_spending
-            )
-        fiscal_capacity = self.government.treasury_cash + self._period_government_tax_revenue
-        return max(fiscal_capacity, last_spending, 0.18 * last_gdp)
+        return self._government_structural_budget_anchor()
 
     def _consume_households(self) -> None:
         discretionary_firms = [firm for key in DISCRETIONARY_SECTOR_KEYS for firm in self._sector_firms(key)]
@@ -6956,6 +8429,7 @@ class EconomySimulation:
 
             family_row_indices: list[int] = []
             member_target_units_by_sector: dict[int, dict[str, float]] = {}
+            public_education_target_by_sector = {"school": 0.0, "university": 0.0}
             family_baseline_demand: np.ndarray | None = None
             if self._period_essential_desired_units_matrix is not None:
                 family_row_indices = [
@@ -6998,6 +8472,13 @@ class EconomySimulation:
                 target_units["school"] = self._household_sector_desired_units(member, "school")
                 target_units["university"] = self._household_sector_desired_units(member, "university")
                 member_target_units_by_sector[member.id] = target_units
+                if self.config.government_enabled:
+                    for sector_key in MERIT_SECTOR_KEYS:
+                        public_education_target_by_sector[sector_key] += self._public_education_target_units(
+                            member,
+                            sector_key,
+                            target_units[sector_key],
+                        )
 
             if self._period_essential_budget_vector is not None and family_row_indices and all(index >= 0 for index in family_row_indices):
                 family_basic_basket_cost = float(
@@ -7065,6 +8546,31 @@ class EconomySimulation:
                 baseline_essential_units_bought += units_bought
                 purchased_units_by_sector[sector_key] += units_bought
                 self._period_essential_sales_units += units_bought
+
+            merit_target_by_sector: dict[str, float] = {}
+            for sector_key in MERIT_SECTOR_KEYS:
+                desired_units = sum(
+                    member_target_units_by_sector[member.id][sector_key]
+                    for member in family_members
+                )
+                private_target_units = max(
+                    0.0,
+                    desired_units - public_education_target_by_sector.get(sector_key, 0.0),
+                )
+                merit_target_by_sector[sector_key] = private_target_units
+                if private_target_units <= 0.0:
+                    continue
+                self._period_potential_demand_units += private_target_units
+                self._period_sector_potential_demand_units[sector_key] += private_target_units
+                self._period_sector_budget_demand_units[sector_key] += private_target_units
+                cash, units_bought = self._purchase_from_sector(
+                    family_price_sensitivity,
+                    sector_key,
+                    private_target_units,
+                    cash,
+                    spending_log,
+                )
+                purchased_units_by_sector[sector_key] += units_bought
 
             target_savings_rate = self._family_savings_rate(
                 family_members,
@@ -7144,7 +8650,7 @@ class EconomySimulation:
 
             if neutral_nonessential_budget > 0.0:
                 sector_preference_units: dict[str, float] = {}
-                for sector_key in DISCRETIONARY_SECTOR_KEYS:
+                for sector_key in PURE_DISCRETIONARY_SECTOR_KEYS:
                     if family_baseline_demand is not None and sector_key in ARRAY_BACKED_SECTOR_KEYS:
                         preference_units = float(
                             family_baseline_demand[ARRAY_BACKED_SECTOR_INDEX[sector_key]]
@@ -7157,13 +8663,13 @@ class EconomySimulation:
                     sector_preference_units[sector_key] = preference_units
                 total_preference_units = sum(sector_preference_units.values())
                 if total_preference_units <= 0.0:
-                    sector_preference_units = {key: 1.0 for key in DISCRETIONARY_SECTOR_KEYS}
+                    sector_preference_units = {key: 1.0 for key in PURE_DISCRETIONARY_SECTOR_KEYS}
                 essential_coverage = self._family_essential_coverage_ratio(
                     essential_target_by_sector,
                     purchased_units_by_sector,
                 )
                 cash = self._purchase_discretionary_bundle(
-                    sector_keys=list(DISCRETIONARY_SECTOR_KEYS),
+                    sector_keys=list(PURE_DISCRETIONARY_SECTOR_KEYS),
                     sector_preference_units=sector_preference_units,
                     essential_coverage=essential_coverage,
                     family_remaining_cash=cash,
@@ -7184,13 +8690,16 @@ class EconomySimulation:
                 )
                 if public_budget_remaining <= 0.0:
                     continue
+                total_target_units = sum(
+                    member_target_units_by_sector[member.id][sector_key] for member in family_members
+                )
+                public_target_units = public_education_target_by_sector[sector_key]
                 unmet_units = max(
                     0.0,
-                    (
-                        sum(member_target_units_by_sector[member.id][sector_key] for member in family_members)
-                        if not (family_baseline_demand is not None and sector_key in ARRAY_BACKED_SECTOR_KEYS)
-                        else float(family_baseline_demand[ARRAY_BACKED_SECTOR_INDEX[sector_key]])
-                    ) - purchased_units_by_sector.get(sector_key, 0.0),
+                    max(
+                        public_target_units,
+                        total_target_units - purchased_units_by_sector.get(sector_key, 0.0),
+                    ),
                 )
                 if unmet_units <= 0.0:
                     continue
@@ -7241,10 +8750,12 @@ class EconomySimulation:
                 if sector_key == "school":
                     public_school_budget_remaining = max(0.0, public_school_budget_remaining - government_spent)
                     self._period_government_school_spending += government_spent
+                    self._period_government_school_units += government_units_bought
                     self.government.school_public_spending_this_period += government_spent
                 else:
                     public_university_budget_remaining = max(0.0, public_university_budget_remaining - government_spent)
                     self._period_government_university_spending += government_spent
+                    self._period_government_university_units += government_units_bought
                     self.government.university_public_spending_this_period += government_spent
                 purchased_units_by_sector[sector_key] += government_units_bought
 
@@ -7493,18 +9004,31 @@ class EconomySimulation:
             firm.last_revenue = revenue
             firm.last_sales = firm.sales_this_period
             firm.sales_history.append(firm.last_sales)
-            if len(firm.sales_history) > 6:
-                del firm.sales_history[:-6]
+            firm.expected_sales_history.append(max(0.0, firm.last_expected_sales))
+            firm.production_history.append(max(0.0, firm.last_production))
+            max_history = self._firm_market_memory_periods()
+            if len(firm.sales_history) > max_history:
+                del firm.sales_history[:-max_history]
+            if len(firm.expected_sales_history) > max_history:
+                del firm.expected_sales_history[:-max_history]
+            if len(firm.production_history) > max_history:
+                del firm.production_history[:-max_history]
 
             depreciation = firm.last_capital_charge
             firm.capital = max(0.0, firm.capital - depreciation)
             firm.last_total_cost = (
                 firm.last_wage_bill
+                + firm.last_wage_bill * self._government_payroll_tax_rate()
                 + firm.last_input_cost
                 + firm.last_transport_cost
                 + firm.last_fixed_overhead
                 + depreciation
             )
+            carry_cost, waste_cost = self._apply_inventory_carry_and_waste(firm)
+            firm.last_total_cost += carry_cost + waste_cost
+            if carry_cost > 0.0:
+                firm.cash -= carry_cost
+                self._queue_sector_payment("housing", carry_cost)
             interest_cost = self._service_firm_loans(firm)
             firm.last_total_cost += interest_cost
             pre_tax_profit = revenue - firm.last_total_cost
@@ -7523,6 +9047,11 @@ class EconomySimulation:
 
             if profit > 0.0 and firm.cash > 0.0:
                 owner = self.entrepreneurs[firm.owner_id]
+                sell_through = self._firm_recent_sell_through(firm)
+                revealed_growth_pressure = self._firm_revealed_growth_pressure(
+                    firm,
+                    use_current_period=True,
+                )
                 cash_reserve = max(
                     20.0,
                     firm.last_wage_bill * self.config.cash_reserve_periods,
@@ -7532,11 +9061,20 @@ class EconomySimulation:
                     0.0,
                     3.0,
                 )
+                macro_stability = self._economy_investment_stability()
+                investment_confidence = self._firm_investment_confidence(
+                    firm,
+                    macro_stability=macro_stability,
+                )
+                loan_rate = max(0.0, self._loan_rate_for_firm(firm))
+                neutral_rate = max(1e-6, self.config.firm_interest_rate_neutral)
+                interest_drag = clamp((loan_rate - neutral_rate) / neutral_rate, -0.50, 2.0)
                 dividend_cap = max(0.0, firm.cash - 0.75 * cash_reserve)
                 effective_payout_ratio = clamp(
                     self.config.payout_ratio
                     + 0.12 * max(0.0, profit / max(1.0, revenue))
                     + 0.10 * excess_cash_ratio
+                    - self.config.firm_revealed_shortage_investment_weight * 0.10 * revealed_growth_pressure
                     - 0.05 * max(0.0, firm.cash_conservatism - 1.0),
                     0.18,
                     0.60,
@@ -7550,9 +9088,21 @@ class EconomySimulation:
                     self.config.investment_rate
                     + 0.14 * max(0.0, profit / max(1.0, revenue))
                     + 0.10 * excess_cash_ratio
-                    + 0.06 * max(0.0, firm.market_share_ambition - 1.0),
+                    + 0.06 * max(0.0, firm.market_share_ambition - 1.0)
+                    + self.config.firm_macro_stability_investment_weight * (investment_confidence - 1.0)
+                    - self.config.firm_investment_interest_sensitivity * max(0.0, interest_drag),
                     0.15,
                     0.60,
+                )
+                effective_investment_rate = clamp(
+                    effective_investment_rate
+                    + self.config.firm_revealed_shortage_investment_weight
+                    * (
+                        0.14 * revealed_growth_pressure
+                        + 0.06 * max(0.0, sell_through - 0.70)
+                    ),
+                    0.15,
+                    0.75,
                 )
                 investment = min(profit * effective_investment_rate, investment_cap)
                 if investment > 0.0:
@@ -7566,6 +9116,12 @@ class EconomySimulation:
                     )
                     if firm.sector in ESSENTIAL_SECTOR_KEYS:
                         tech_share = clamp(tech_share + 0.05, 0.05, 0.60)
+                    tech_share = clamp(
+                        tech_share
+                        + self.config.firm_revealed_shortage_investment_weight * 0.08 * revealed_growth_pressure,
+                        0.05,
+                        0.70,
+                    )
                     technology_investment = investment * tech_share
                     capital_investment = investment - technology_investment
                     planned_investments.append(
@@ -7599,13 +9155,16 @@ class EconomySimulation:
         self._collect_government_wealth_tax()
 
         total_industrial_investment = 0.0
+        investment_knowledge_multiplier = self._investment_knowledge_multiplier()
         for firm, investment, capital_investment, technology_investment in planned_investments:
             effective_investment = min(investment, max(0.0, firm.cash))
             if effective_investment <= 0.0:
                 continue
             capital_share = capital_investment / investment if investment > 0.0 else 0.0
-            actual_capital_investment = effective_investment * capital_share
-            actual_technology_investment = effective_investment - actual_capital_investment
+            actual_capital_investment = effective_investment * capital_share * investment_knowledge_multiplier
+            actual_technology_investment = (
+                effective_investment * (1.0 - capital_share) * investment_knowledge_multiplier
+            )
             firm.cash -= effective_investment
             firm.capital += actual_capital_investment
             firm.technology = clamp(
@@ -7617,7 +9176,7 @@ class EconomySimulation:
                 self.config.technology_gain_min,
                 self.config.technology_gain_max,
             )
-            technology_gain = technology_boost * actual_technology_investment / max(
+            technology_gain = technology_boost * investment_knowledge_multiplier * actual_technology_investment / max(
                 1.0, firm.last_wage_bill + firm.last_fixed_overhead + 1.0
             )
             firm.technology = clamp(
@@ -7706,6 +9265,7 @@ class EconomySimulation:
             firm.workers.clear()
             firm.cash = 0.0
             firm.inventory = 0.0
+            firm.inventory_batches.clear()
             firm.capital = 0.0
             firm.education_level_span = 0.0
             firm.desired_workers = 0
@@ -7720,15 +9280,23 @@ class EconomySimulation:
             firm.last_transport_cost = 0.0
             firm.last_fixed_overhead = 0.0
             firm.last_capital_charge = 0.0
+            firm.last_inventory_carry_cost = 0.0
+            firm.last_inventory_waste_cost = 0.0
             firm.last_unit_cost = 0.0
             firm.last_market_share = 0.0
             firm.sales_history.clear()
+            firm.expected_sales_history.clear()
+            firm.production_history.clear()
             firm.last_expected_sales = 0.0
             firm.market_fragility_belief = 0.0
             firm.forecast_error_belief = 0.0
             firm.last_technology_investment = 0.0
             firm.last_technology_gain = 0.0
             firm.last_interest_cost = 0.0
+            firm.labor_offer_rejections = 0
+            firm.labor_offer_rejection_wage_floor = 0.0
+            firm.last_labor_offer_rejections = 0
+            firm.last_labor_offer_rejection_wage_floor = 0.0
             firm.technology = 0.0
             firm.demand_elasticity = 0.0
             firm.loan_restructure_count = 0
@@ -7774,41 +9342,99 @@ class EconomySimulation:
                 last_essential_fulfillment = self.history[-1].essential_fulfillment_rate if self.history else 0.0
                 if last_essential_fulfillment < 0.95:
                     continue
+            revealed_unmet_units = self._period_sector_revealed_unmet_units.get(spec.key, 0.0)
+            revealed_entry_pressure = self._sector_revealed_expansion_pressure(
+                spec.key,
+                use_current_period=True,
+            )
             demand_signal = self._baseline_demand(spec.key, use_current_period=True)
             if spec.key in ("school", "university"):
                 prior_demand_signal = self._baseline_demand(spec.key, use_current_period=False)
                 demand_signal = 0.55 * demand_signal + 0.45 * prior_demand_signal
+            observed_market_signal = self._observed_sector_demand_signal(spec.key, use_current_period=True)
+            demand_signal = max(
+                demand_signal,
+                observed_market_signal
+                * (
+                    1.0
+                    + self.config.firm_revealed_shortage_entry_weight
+                    * 0.12
+                    * revealed_entry_pressure
+                ),
+            )
             if demand_signal <= 0.0:
                 continue
             active_supply = sum(
-                max(0.0, firm.last_expected_sales, firm.last_sales)
+                self._firm_effective_supply_signal(firm, demand_signal)
                 for firm in self._sector_firms(spec.key)
             )
             if spec.key in ("school", "university"):
                 active_supply += self._public_education_supply_signal(spec.key, use_current_period=False)
-            entry_gap = demand_signal - 0.85 * active_supply
+            supply_coverage_target = clamp(
+                0.85
+                - 0.15
+                * self.config.firm_revealed_shortage_entry_weight
+                * revealed_entry_pressure,
+                0.55,
+                0.85,
+            )
+            entry_gap = demand_signal - supply_coverage_target * active_supply
+            entry_gap += (
+                self.config.firm_revealed_shortage_entry_weight
+                * 0.35
+                * revealed_unmet_units
+            )
             if entry_gap <= 1.0:
                 continue
             gap_ratio = entry_gap / max(1.0, demand_signal)
             max_new_entries = 1
-            if gap_ratio >= 0.40:
+            if gap_ratio >= 0.30:
                 max_new_entries = 2
-            if gap_ratio >= 0.80:
+            if gap_ratio >= 0.60:
                 max_new_entries = 3
             for _ in range(max_new_entries):
+                revealed_unmet_units = self._period_sector_revealed_unmet_units.get(spec.key, 0.0)
+                revealed_entry_pressure = self._sector_revealed_expansion_pressure(
+                    spec.key,
+                    use_current_period=True,
+                )
                 demand_signal = self._baseline_demand(spec.key, use_current_period=True)
                 if spec.key in ("school", "university"):
                     prior_demand_signal = self._baseline_demand(spec.key, use_current_period=False)
                     demand_signal = 0.55 * demand_signal + 0.45 * prior_demand_signal
+                observed_market_signal = self._observed_sector_demand_signal(spec.key, use_current_period=True)
+                demand_signal = max(
+                    demand_signal,
+                    observed_market_signal
+                    * (
+                        1.0
+                        + self.config.firm_revealed_shortage_entry_weight
+                        * 0.12
+                        * revealed_entry_pressure
+                    ),
+                )
                 if demand_signal <= 0.0:
                     break
                 active_supply = sum(
-                    max(0.0, firm.last_expected_sales, firm.last_sales)
+                    self._firm_effective_supply_signal(firm, demand_signal)
                     for firm in self._sector_firms(spec.key)
                 )
                 if spec.key in ("school", "university"):
                     active_supply += self._public_education_supply_signal(spec.key, use_current_period=False)
-                entry_gap = demand_signal - 0.85 * active_supply
+                supply_coverage_target = clamp(
+                    0.85
+                    - 0.15
+                    * self.config.firm_revealed_shortage_entry_weight
+                    * revealed_entry_pressure,
+                    0.55,
+                    0.85,
+                )
+                entry_gap = demand_signal - supply_coverage_target * active_supply
+                entry_gap += (
+                    self.config.firm_revealed_shortage_entry_weight
+                    * 0.35
+                    * revealed_unmet_units
+                )
                 if entry_gap <= 1.0:
                     break
                 inactive_firms = [firm for firm in self.firms_by_sector.get(spec.key, []) if not firm.active]
@@ -7842,7 +9468,17 @@ class EconomySimulation:
         if base_restart_cost <= 0.0:
             return False
 
+        revealed_entry_pressure = self._sector_revealed_expansion_pressure(
+            spec.key,
+            use_current_period=True,
+        )
         perceived_gap = max(0.0, entry_gap if entry_gap is not None else target_demand)
+        perceived_gap *= (
+            1.0
+            + self.config.firm_revealed_shortage_entry_weight
+            * 0.20
+            * revealed_entry_pressure
+        )
         owner = self._select_entry_owner(
             spec.key,
             target_demand,
@@ -7859,13 +9495,24 @@ class EconomySimulation:
         scale = available_surplus / base_restart_cost
         if scale < self.config.firm_restart_min_scale:
             return False
+        scale *= (
+            1.0
+            + self.config.firm_revealed_shortage_entry_weight
+            * 0.10
+            * revealed_entry_pressure
+        )
         scale = clamp(scale, self.config.firm_restart_min_scale, self.config.firm_restart_max_scale)
         restart_cost = min(
             available_surplus,
             self._restart_funding_need(spec, scale, demand_units=target_demand),
         )
         self._withdraw_owner_liquid(owner, restart_cost)
-        package_multiplier = self.config.firm_restart_package_multiplier
+        package_multiplier = self.config.firm_restart_package_multiplier * (
+            1.0
+            + self.config.firm_revealed_shortage_entry_weight
+            * 0.20
+            * revealed_entry_pressure
+        )
         effective_scale = scale * package_multiplier
         effective_demand = target_demand * effective_scale
         base_cash_budget, base_capital_budget, base_inventory_budget = self._entry_package_budgets(
@@ -7918,6 +9565,7 @@ class EconomySimulation:
                 firm.input_cost_per_unit = 0.0
             firm.education_level_span = 0.0
         firm.inventory = max(0.0, startup_inventory_units)
+        firm.inventory_batches = [] if education_blueprint is not None else [max(0.0, firm.inventory)]
 
         expected_sales = effective_demand * self.rng.uniform(0.9, 1.05) * max(0.10, package_funding_ratio)
         firm.last_worker_count = 0
@@ -7928,17 +9576,23 @@ class EconomySimulation:
                 firm.inventory,
                 self._education_firm_capacity(firm),
             )
+            firm.inventory_batches = []
             target_service_units = self._education_service_target_units(firm, expected_sales)
-            desired_workers = max(1, math.ceil(target_service_units / max(0.25, effective_productivity)))
+            desired_workers = self._workers_needed_for_units(
+                target_service_units,
+                effective_productivity,
+                productivity_floor=0.25,
+            )
         else:
-            desired_output = expected_sales + firm.inventory
-            desired_workers = max(1, math.ceil(desired_output / max(0.1, effective_productivity)))
+            desired_output = self._firm_desired_output_from_expected_sales(firm, expected_sales)
+            desired_workers = self._workers_needed_for_units(desired_output, effective_productivity)
         last_wage_bill = desired_workers * firm.wage_offer
         capital_charge = firm.capital * self.config.depreciation_rate
         last_input_cost = expected_sales * firm.input_cost_per_unit
         last_transport_cost = expected_sales * firm.transport_cost_per_unit
         last_total_cost = (
             last_wage_bill
+            + last_wage_bill * self._government_payroll_tax_rate()
             + last_input_cost
             + last_transport_cost
             + firm.fixed_overhead
@@ -7953,11 +9607,16 @@ class EconomySimulation:
         firm.price_aggressiveness = traits["price_aggressiveness"]
         firm.cash_conservatism = traits["cash_conservatism"]
         firm.market_share_ambition = traits["market_share_ambition"]
+        firm.expansion_credit_appetite = traits["expansion_credit_appetite"]
+        firm.stability_sensitivity = traits["stability_sensitivity"]
+        firm.investment_animal_spirits = traits["investment_animal_spirits"]
         firm.forecast_caution = traits["forecast_caution"]
         firm.price = self._initial_firm_price(spec, unit_cost)
         self._refresh_firm_startup_state(firm, spec, expected_sales)
         firm.last_market_share = 0.0
         firm.sales_history = [expected_sales]
+        firm.expected_sales_history = [expected_sales]
+        firm.production_history = [firm.last_production]
         firm.market_fragility_belief = clamp(
             0.45 * self._sector_public_fragility_signal(spec.key)
             + 0.35 * self._social_survival_fragility_signal(spec.key)
@@ -8057,8 +9716,22 @@ class EconomySimulation:
             (self._average_sector_price(spec.key) / spec.base_price) * spec.household_demand_share
             for spec in SECTOR_SPECS
         ) / max(1e-9, total_household_share)
+        active_essential_firms = [
+            firm for firm in self.firms if firm.active and firm.sector in ESSENTIAL_SECTOR_KEYS
+        ]
         total_capital_stock = sum(firm.capital for firm in self.firms if firm.active)
         total_inventory_units = sum(firm.inventory for firm in self.firms if firm.active)
+        essential_inventory_units = sum(max(0.0, firm.inventory) for firm in active_essential_firms)
+        essential_target_inventory_units = sum(max(0.0, firm.target_inventory) for firm in active_essential_firms)
+        essential_expected_sales_units = sum(max(0.0, firm.last_expected_sales) for firm in active_essential_firms)
+        essential_total_sales_units = sum(
+            max(0.0, self._period_sector_sales_units.get(sector_key, 0.0))
+            for sector_key in ESSENTIAL_SECTOR_KEYS
+        )
+        essential_government_sales_units = max(
+            0.0,
+            essential_total_sales_units - self._period_essential_sales_units,
+        )
         total_inventory_book_value = self._current_inventory_book_value()
         goods_monetary_mass = self._current_goods_monetary_mass()
         total_liquid_money = self._current_total_liquid_money()
@@ -8120,10 +9793,14 @@ class EconomySimulation:
         )
         household_final_consumption = worker_consumption_spending + self._period_entrepreneur_spending
         government_final_consumption = (
-            self._period_government_procurement_spending + self._period_government_education_spending
+            self._period_government_procurement_spending
+            + self._period_government_education_spending
+            + self._period_government_public_administration_spending
         )
         gross_fixed_capital_formation = (
-            self._period_investment_spending + self._period_startup_fixed_capital_formation
+            self._period_investment_spending
+            + self._period_startup_fixed_capital_formation
+            + self._period_government_public_capital_formation
         )
         change_in_inventories = (
             total_inventory_book_value - prior_inventory_book_value + self._period_startup_inventory_investment
@@ -8140,6 +9817,19 @@ class EconomySimulation:
             + net_exports
         )
         gdp_expenditure_gap = gdp_nominal - gdp_expenditure_sna
+        gdp_deflator = self._gdp_deflator_estimate(
+            gdp_nominal=gdp_nominal,
+            household_final_consumption=household_final_consumption,
+            government_final_consumption=government_final_consumption,
+            gross_fixed_capital_formation=gross_fixed_capital_formation,
+            change_in_inventories=change_in_inventories,
+            net_exports=net_exports,
+            price_index=price_index,
+            government_procurement_spending=self._period_government_procurement_spending,
+            government_school_spending=self._period_government_school_spending,
+            government_university_spending=self._period_government_university_spending,
+            government_public_administration_spending=self._period_government_public_administration_spending,
+        )
         gdp_per_capita = gdp_nominal / max(1, population)
         wage_earner_incomes = sorted(
             household.last_income
@@ -8298,9 +9988,8 @@ class EconomySimulation:
             1
             for household in active_households
             if self._is_university_age(household)
-            and self._household_has_school_credential(household)
-            and self._household_is_university_track(household)
             and not self._household_has_university_credential(household)
+            and self._household_sector_desired_units(household, "university") > 0.0
         )
         school_students = sum(
             1
@@ -8338,9 +10027,8 @@ class EconomySimulation:
             1
             for household in active_households
             if self._is_university_age(household)
-            and self._household_has_school_credential(household)
-            and self._household_is_university_track(household)
             and not self._household_has_university_credential(household)
+            and self._household_sector_desired_units(household, "university") > 0.0
             and family_resources_below_basket_by_household.get(household.id, False)
         )
         low_resource_school_students = sum(
@@ -8440,9 +10128,22 @@ class EconomySimulation:
         skilled_firms = [
             firm for firm in self.firms if firm.active and firm.sector in QUALIFIED_SECTOR_KEYS
         ]
-        total_desired_workers = sum(max(0, firm.desired_workers) for firm in self.firms if firm.active)
-        skilled_desired_workers = sum(max(0, firm.desired_workers) for firm in skilled_firms)
-        skilled_filled_workers = sum(len(firm.workers) for firm in skilled_firms)
+        public_administration_desired_workers = self._public_administration_target_workers()
+        public_administration_filled_workers = sum(
+            1 for household in active_households if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID
+        )
+        total_desired_workers = (
+            sum(max(0, firm.desired_workers) for firm in self.firms if firm.active)
+            + public_administration_desired_workers
+        )
+        skilled_desired_workers = (
+            sum(max(0, firm.desired_workers) for firm in skilled_firms)
+            + public_administration_desired_workers
+        )
+        skilled_filled_workers = (
+            sum(len(firm.workers) for firm in skilled_firms)
+            + public_administration_filled_workers
+        )
         active_school_firms = sum(1 for firm in self.firms if firm.active and firm.sector == "school")
         active_university_firms = sum(1 for firm in self.firms if firm.active and firm.sector == "university")
 
@@ -8486,6 +10187,11 @@ class EconomySimulation:
             essential_demand_units=self._period_essential_demand_units,
             essential_production_units=self._period_essential_production_units,
             essential_sales_units=self._period_essential_sales_units,
+            essential_total_sales_units=essential_total_sales_units,
+            essential_government_sales_units=essential_government_sales_units,
+            essential_inventory_units=essential_inventory_units,
+            essential_target_inventory_units=essential_target_inventory_units,
+            essential_expected_sales_units=essential_expected_sales_units,
             essential_fulfillment_rate=essential_fulfillment_rate,
             people_full_essential_coverage=people_full_essential_coverage,
             full_essential_coverage_share=full_essential_coverage_share,
@@ -8574,9 +10280,12 @@ class EconomySimulation:
             worker_liquid_share=worker_liquid_share,
             goods_monetary_mass=goods_monetary_mass,
             price_index=price_index,
+            gdp_deflator=gdp_deflator,
             government_treasury_cash=self.government.treasury_cash,
             government_debt_outstanding=self.government.debt_outstanding,
             government_tax_revenue=self._period_government_tax_revenue,
+            government_labor_tax_revenue=self._period_government_labor_tax_revenue,
+            government_payroll_tax_revenue=self._period_government_payroll_tax_revenue,
             government_corporate_tax_revenue=self._period_government_corporate_tax_revenue,
             government_dividend_tax_revenue=self._period_government_dividend_tax_revenue,
             government_wealth_tax_revenue=self._period_government_wealth_tax_revenue,
@@ -8588,6 +10297,12 @@ class EconomySimulation:
             government_education_spending=self._period_government_education_spending,
             government_school_spending=self._period_government_school_spending,
             government_university_spending=self._period_government_university_spending,
+            government_school_units=self._period_government_school_units,
+            government_university_units=self._period_government_university_units,
+            school_average_price=self._average_sector_price("school"),
+            university_average_price=self._average_sector_price("university"),
+            government_public_administration_spending=self._period_government_public_administration_spending,
+            government_infrastructure_spending=self._period_government_infrastructure_spending,
             government_bond_issuance=self._period_government_bond_issuance,
             government_deficit=self._period_government_deficit,
             government_surplus=self._period_government_surplus,
@@ -8614,15 +10329,19 @@ class EconomySimulation:
             gdp_expenditure_gap=gdp_expenditure_gap,
             labor_share_gdp=self._period_wages / gdp_denom,
             profit_share_gdp=self._period_profit / gdp_denom,
-            investment_share_gdp=self._period_investment_spending / gdp_denom,
+            investment_share_gdp=gross_fixed_capital_formation / gdp_denom,
             capitalist_consumption_share_gdp=self._period_entrepreneur_spending / gdp_denom,
             government_spending_share_gdp=(
                 self._period_government_transfers
                 + self._period_government_procurement_spending
                 + self._period_government_education_spending
+                + self._period_government_public_administration_spending
+                + self._period_government_infrastructure_spending
             ) / gdp_denom,
             dividend_share_gdp=self._period_dividends_paid / gdp_denom,
             retained_profit_share_gdp=retained_profit / gdp_denom,
+            firm_expansion_credit_creation=self._period_firm_expansion_credit_issued,
+            investment_knowledge_multiplier=self._investment_knowledge_multiplier(),
             central_bank_money_supply=self.central_bank.money_supply,
             central_bank_target_money_supply=self._period_central_bank_target_money_supply,
             central_bank_policy_rate=self.central_bank.policy_rate,
@@ -8664,6 +10383,9 @@ class EconomySimulation:
             money_velocity=money_velocity,
             total_liquid_money=total_liquid_money,
             total_household_savings=sum(household.savings for household in active_households),
+            public_capital_stock=self.government.public_capital_stock,
+            public_infrastructure_productivity_multiplier=self._public_infrastructure_productivity_multiplier(),
+            public_infrastructure_transport_cost_multiplier=self._public_infrastructure_transport_cost_multiplier(),
         )
 
     def _build_firm_period_snapshots(self) -> list[FirmPeriodSnapshot]:

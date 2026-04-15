@@ -1,2 +1,0 @@
-[console_scripts]
-economy-sim = economy_simulator.cli:main

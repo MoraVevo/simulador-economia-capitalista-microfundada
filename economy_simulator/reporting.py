@@ -24,6 +24,7 @@ CORE_HISTORY_COLUMNS = [
     "potential_gdp_nominal",
     "output_gap_share",
     "cpi",
+    "gdp_deflator",
     "inflation_rate",
     "gdp_growth",
     "population_growth",
@@ -33,6 +34,11 @@ CORE_HISTORY_COLUMNS = [
     "essential_demand_units",
     "essential_production_units",
     "essential_sales_units",
+    "essential_total_sales_units",
+    "essential_government_sales_units",
+    "essential_inventory_units",
+    "essential_target_inventory_units",
+    "essential_expected_sales_units",
     "people_full_essential_coverage",
     "full_essential_coverage_share",
     "average_food_meals_per_person",
@@ -49,9 +55,19 @@ CORE_HISTORY_COLUMNS = [
     "central_bank_monetary_gap_share",
     "average_bank_reserve_ratio",
     "government_tax_revenue",
+    "government_labor_tax_revenue",
+    "government_payroll_tax_revenue",
     "government_total_spending",
     "government_deficit",
     "government_debt_outstanding",
+    "government_school_units",
+    "government_university_units",
+    "school_average_price",
+    "university_average_price",
+    "government_school_unit_cost",
+    "government_university_unit_cost",
+    "government_school_unit_cost_ratio_private_price",
+    "government_university_unit_cost_ratio_private_price",
     "recession_flag",
     "recession_intensity",
     "government_countercyclical_spending",
@@ -59,14 +75,25 @@ CORE_HISTORY_COLUMNS = [
     "government_countercyclical_procurement_multiplier",
     "household_final_consumption_share_gdp",
     "government_final_consumption_share_gdp",
+    "government_infrastructure_spending_share_gdp",
+    "government_spending_share_gdp",
+    "government_tax_burden_gdp",
+    "government_labor_tax_burden_gdp",
+    "government_payroll_tax_burden_gdp",
     "gross_capital_formation_share_gdp",
+    "firm_expansion_credit_creation",
+    "investment_knowledge_multiplier",
+    "public_capital_stock",
     "net_exports_share_gdp",
     "gdp_expenditure_gap_share_gdp",
     "government_deficit_share_gdp",
     "school_enrollment_share",
+    "children_studying_ratio",
     "university_enrollment_share",
     "school_completion_share",
+    "adults_with_school_credential_ratio",
     "university_completion_share",
+    "adults_with_university_credential_ratio",
     "low_resource_school_enrollment_share",
     "low_resource_university_enrollment_share",
     "low_resource_university_student_share",
@@ -88,8 +115,10 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
 def _append_derived_columns(frame: pd.DataFrame, derived_columns: dict[str, pd.Series]) -> pd.DataFrame:
     if not derived_columns:
         return frame.copy()
-    derived_frame = pd.DataFrame(derived_columns, index=frame.index)
-    return pd.concat([frame, derived_frame], axis=1).copy()
+    enriched = frame.copy()
+    for column, values in derived_columns.items():
+        enriched[column] = values
+    return enriched.copy()
 
 
 def history_frame(
@@ -113,14 +142,17 @@ def history_frame(
     )
     worker_augmented_asset_denominator = frame["worker_bank_deposits"] + capitalist_augmented_assets
     employment_count = frame["labor_force"] * frame["employment_rate"]
-    real_gdp_nominal = _safe_ratio(frame["gdp_nominal"], frame["price_index"])
+    gdp_deflator = frame["gdp_deflator"] if "gdp_deflator" in frame.columns else frame["price_index"]
+    real_gdp_nominal = _safe_ratio(frame["gdp_nominal"], gdp_deflator)
     average_wage = _safe_ratio(frame["total_wages"], employment_count)
     potential_multiplier = (target_employment_rate / frame["employment_rate"].clip(lower=1e-9)).clip(lower=1.0)
     potential_real_gdp = real_gdp_nominal * potential_multiplier
-    potential_gdp_nominal = potential_real_gdp * frame["price_index"]
+    potential_gdp_nominal = potential_real_gdp * gdp_deflator
     derived_columns = {
         "cpi": frame["price_index"],
-        "inflation_rate": frame["price_index"].pct_change(),
+        "gdp_deflator": gdp_deflator,
+        "inflation_rate": gdp_deflator.pct_change(),
+        "cpi_inflation_rate": frame["price_index"].pct_change(),
         "gdp_growth": frame["gdp_nominal"].pct_change(),
         "gdp_per_capita_growth": frame["gdp_per_capita"].pct_change(),
         "population_growth": frame["population"].pct_change(),
@@ -211,6 +243,14 @@ def history_frame(
             frame["government_education_spending"],
             frame["gdp_nominal"],
         ),
+        "government_public_administration_spending_share_gdp": _safe_ratio(
+            frame["government_public_administration_spending"],
+            frame["gdp_nominal"],
+        ),
+        "government_infrastructure_spending_share_gdp": _safe_ratio(
+            frame["government_infrastructure_spending"],
+            frame["gdp_nominal"],
+        ),
         "government_school_spending_share_gdp": _safe_ratio(
             frame["government_school_spending"],
             frame["gdp_nominal"],
@@ -219,6 +259,25 @@ def history_frame(
             frame["government_university_spending"],
             frame["gdp_nominal"],
         ),
+        "government_school_unit_cost": _safe_ratio(
+            frame["government_school_spending"],
+            frame["government_school_units"],
+        ),
+        "government_university_unit_cost": _safe_ratio(
+            frame["government_university_spending"],
+            frame["government_university_units"],
+        ),
+        "government_school_unit_cost_ratio_private_price": _safe_ratio(
+            _safe_ratio(frame["government_school_spending"], frame["government_school_units"]),
+            frame["school_average_price"],
+        ),
+        "government_university_unit_cost_ratio_private_price": _safe_ratio(
+            _safe_ratio(frame["government_university_spending"], frame["government_university_units"]),
+            frame["university_average_price"],
+        ),
+        "children_studying_ratio": frame["school_enrollment_share"],
+        "adults_with_school_credential_ratio": frame["school_completion_share"],
+        "adults_with_university_credential_ratio": frame["university_completion_share"],
         "net_exports_share_gdp": _safe_ratio(
             frame["net_exports"],
             frame["gdp_nominal"],
@@ -249,8 +308,18 @@ def history_frame(
             frame["government_transfers"]
             + frame["government_procurement_spending"]
             + frame["government_education_spending"]
+            + frame["government_public_administration_spending"]
+            + frame["government_infrastructure_spending"]
         ),
         "government_tax_burden_gdp": _safe_ratio(frame["government_tax_revenue"], frame["gdp_nominal"]),
+        "government_labor_tax_burden_gdp": _safe_ratio(
+            frame["government_labor_tax_revenue"],
+            frame["gdp_nominal"],
+        ),
+        "government_payroll_tax_burden_gdp": _safe_ratio(
+            frame["government_payroll_tax_revenue"],
+            frame["gdp_nominal"],
+        ),
         "government_corporate_tax_burden_gdp": _safe_ratio(
             frame["government_corporate_tax_revenue"],
             frame["gdp_nominal"],
@@ -333,6 +402,8 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             births=("births", "sum"),
             deaths=("deaths", "sum"),
             gdp_nominal=("gdp_nominal", "sum"),
+            real_gdp_nominal=("real_gdp_nominal", "sum"),
+            potential_real_gdp=("potential_real_gdp", "sum"),
             gdp_per_capita_monthly=("gdp_per_capita", "mean"),
             total_wages=("total_wages", "sum"),
             total_sales_units=("total_sales_units", "sum"),
@@ -341,6 +412,11 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             essential_demand_units=("essential_demand_units", "sum"),
             essential_production_units=("essential_production_units", "sum"),
             essential_sales_units=("essential_sales_units", "sum"),
+            essential_total_sales_units=("essential_total_sales_units", "sum"),
+            essential_government_sales_units=("essential_government_sales_units", "sum"),
+            essential_inventory_units=("essential_inventory_units", "mean"),
+            essential_target_inventory_units=("essential_target_inventory_units", "mean"),
+            essential_expected_sales_units=("essential_expected_sales_units", "sum"),
             essential_fulfillment_rate=("essential_fulfillment_rate", "mean"),
             average_food_meals_per_person=("average_food_meals_per_person", "mean"),
             food_sufficient_share=("food_sufficient_share", "mean"),
@@ -406,6 +482,7 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             worker_credit_outstanding=("worker_credit_outstanding", "last"),
             goods_monetary_mass=("goods_monetary_mass", "last"),
             end_price_index=("price_index", "last"),
+            end_gdp_deflator=("gdp_deflator", "last"),
             gini_household_savings=("gini_household_savings", "last"),
             gini_owner_wealth=("gini_owner_wealth", "last"),
             capitalist_bank_deposits=("capitalist_bank_deposits", "last"),
@@ -421,6 +498,8 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             government_treasury_cash=("government_treasury_cash", "last"),
             government_debt_outstanding=("government_debt_outstanding", "last"),
             government_tax_revenue=("government_tax_revenue", "sum"),
+            government_labor_tax_revenue=("government_labor_tax_revenue", "sum"),
+            government_payroll_tax_revenue=("government_payroll_tax_revenue", "sum"),
             government_corporate_tax_revenue=("government_corporate_tax_revenue", "sum"),
             government_dividend_tax_revenue=("government_dividend_tax_revenue", "sum"),
             government_wealth_tax_revenue=("government_wealth_tax_revenue", "sum"),
@@ -432,6 +511,12 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             government_education_spending=("government_education_spending", "sum"),
             government_school_spending=("government_school_spending", "sum"),
             government_university_spending=("government_university_spending", "sum"),
+            government_school_units=("government_school_units", "sum"),
+            government_university_units=("government_university_units", "sum"),
+            school_average_price=("school_average_price", "mean"),
+            university_average_price=("university_average_price", "mean"),
+            government_public_administration_spending=("government_public_administration_spending", "sum"),
+            government_infrastructure_spending=("government_infrastructure_spending", "sum"),
             government_bond_issuance=("government_bond_issuance", "sum"),
             government_deficit=("government_deficit", "sum"),
             government_surplus=("government_surplus", "sum"),
@@ -465,6 +550,8 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             government_spending_share_gdp=("government_spending_share_gdp", "mean"),
             dividend_share_gdp=("dividend_share_gdp", "mean"),
             retained_profit_share_gdp=("retained_profit_share_gdp", "mean"),
+            firm_expansion_credit_creation=("firm_expansion_credit_creation", "sum"),
+            investment_knowledge_multiplier=("investment_knowledge_multiplier", "mean"),
             central_bank_money_supply=("central_bank_money_supply", "last"),
             central_bank_target_money_supply=("central_bank_target_money_supply", "last"),
             central_bank_policy_rate=("central_bank_policy_rate", "last"),
@@ -500,6 +587,15 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             total_inventory_units=("total_inventory_units", "last"),
             total_liquid_money=("total_liquid_money", "last"),
             total_household_savings=("total_household_savings", "last"),
+            public_capital_stock=("public_capital_stock", "last"),
+            public_infrastructure_productivity_multiplier=(
+                "public_infrastructure_productivity_multiplier",
+                "last",
+            ),
+            public_infrastructure_transport_cost_multiplier=(
+                "public_infrastructure_transport_cost_multiplier",
+                "last",
+            ),
         )
         .reset_index()
         .sort_values("year")
@@ -515,24 +611,24 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
         + annual["capitalist_inventory_value"]
     )
     worker_augmented_asset_denominator = annual["worker_bank_deposits"] + capitalist_augmented_assets
-    target_employment_rate = max(1e-9, 1.0 - target_unemployment)
     employment_count = annual["labor_force"] * annual["avg_employment_rate"]
-    real_gdp_nominal = _safe_ratio(annual["gdp_nominal"], annual["end_price_index"])
+    annual_gdp_deflator = _safe_ratio(annual["gdp_nominal"], annual["real_gdp_nominal"])
     average_wage = _safe_ratio(annual["total_wages"], employment_count)
-    potential_multiplier = (target_employment_rate / annual["avg_employment_rate"].clip(lower=1e-9)).clip(lower=1.0)
-    potential_real_gdp = real_gdp_nominal * potential_multiplier
+    potential_real_gdp = annual["potential_real_gdp"]
     derived_columns = {
         "cpi": annual["end_price_index"],
+        "gdp_deflator": annual_gdp_deflator,
         "gdp_per_capita_annual": _safe_ratio(annual["gdp_nominal"], annual["population"]),
-        "real_gdp_nominal": real_gdp_nominal,
+        "real_gdp_nominal": annual["real_gdp_nominal"],
         "employment_count": employment_count,
         "average_wage": average_wage,
         "real_average_wage": _safe_ratio(average_wage, annual["end_price_index"]),
         "potential_real_gdp": potential_real_gdp,
-        "potential_gdp_nominal": potential_real_gdp * annual["end_price_index"],
-        "output_gap_share": _safe_ratio(potential_real_gdp - real_gdp_nominal, potential_real_gdp),
+        "potential_gdp_nominal": potential_real_gdp * annual_gdp_deflator,
+        "output_gap_share": _safe_ratio(potential_real_gdp - annual["real_gdp_nominal"], potential_real_gdp),
         "gdp_growth_yoy": annual["gdp_nominal"].pct_change(),
-        "inflation_yoy": annual["end_price_index"].pct_change(),
+        "inflation_yoy": annual_gdp_deflator.pct_change(),
+        "cpi_inflation_yoy": annual["end_price_index"].pct_change(),
         "population_growth_yoy": annual["end_population"].pct_change(),
         "perceived_utility_growth_yoy": annual["average_perceived_utility"].pct_change(),
         "birth_rate": _safe_ratio(annual["births"], annual["population"]),
@@ -599,6 +695,14 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             annual["government_education_spending"],
             annual["gdp_nominal"],
         ),
+        "government_public_administration_spending_share_gdp": _safe_ratio(
+            annual["government_public_administration_spending"],
+            annual["gdp_nominal"],
+        ),
+        "government_infrastructure_spending_share_gdp": _safe_ratio(
+            annual["government_infrastructure_spending"],
+            annual["gdp_nominal"],
+        ),
         "government_school_spending_share_gdp": _safe_ratio(
             annual["government_school_spending"],
             annual["gdp_nominal"],
@@ -607,6 +711,25 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             annual["government_university_spending"],
             annual["gdp_nominal"],
         ),
+        "government_school_unit_cost": _safe_ratio(
+            annual["government_school_spending"],
+            annual["government_school_units"],
+        ),
+        "government_university_unit_cost": _safe_ratio(
+            annual["government_university_spending"],
+            annual["government_university_units"],
+        ),
+        "government_school_unit_cost_ratio_private_price": _safe_ratio(
+            _safe_ratio(annual["government_school_spending"], annual["government_school_units"]),
+            annual["school_average_price"],
+        ),
+        "government_university_unit_cost_ratio_private_price": _safe_ratio(
+            _safe_ratio(annual["government_university_spending"], annual["government_university_units"]),
+            annual["university_average_price"],
+        ),
+        "children_studying_ratio": annual["school_enrollment_share"],
+        "adults_with_school_credential_ratio": annual["school_completion_share"],
+        "adults_with_university_credential_ratio": annual["university_completion_share"],
         "net_exports_share_gdp": _safe_ratio(
             annual["net_exports"],
             annual["gdp_nominal"],
@@ -628,8 +751,18 @@ def annual_frame(history_frame: pd.DataFrame, target_unemployment: float = 0.08)
             annual["government_transfers"]
             + annual["government_procurement_spending"]
             + annual["government_education_spending"]
+            + annual["government_public_administration_spending"]
+            + annual["government_infrastructure_spending"]
         ),
         "government_tax_burden_gdp": _safe_ratio(annual["government_tax_revenue"], annual["gdp_nominal"]),
+        "government_labor_tax_burden_gdp": _safe_ratio(
+            annual["government_labor_tax_revenue"],
+            annual["gdp_nominal"],
+        ),
+        "government_payroll_tax_burden_gdp": _safe_ratio(
+            annual["government_payroll_tax_revenue"],
+            annual["gdp_nominal"],
+        ),
         "government_corporate_tax_burden_gdp": _safe_ratio(
             annual["government_corporate_tax_revenue"],
             annual["gdp_nominal"],

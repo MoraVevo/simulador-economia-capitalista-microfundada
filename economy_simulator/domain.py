@@ -103,6 +103,18 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         target_inventory_ratio=0.10,
         markup=0.20,
     ),
+    SectorSpec(
+        key="public_administration",
+        name="Public administration / state services",
+        base_price=14.0,
+        base_wage=9.8,
+        base_productivity=0.98,
+        household_demand_share=0.0,
+        essential_need=0.0,
+        discretionary_weight=0.0,
+        target_inventory_ratio=0.0,
+        markup=0.0,
+    ),
 )
 
 SECTOR_BY_KEY = {spec.key: spec for spec in SECTOR_SPECS}
@@ -149,6 +161,7 @@ class Household:
     employment_tenure: int = 0
     wage_income: float = 0.0
     last_income: float = 0.0
+    previous_income: float = 0.0
     last_available_cash: float = 0.0
     alive: bool = True
     deprivation_streak: int = 0
@@ -160,6 +173,8 @@ class Household:
     last_perceived_utility: float = 0.0
     school_years_completed: float = 0.0
     university_years_completed: float = 0.0
+    public_school_support_persistence: float = 0.0
+    public_university_support_persistence: float = 0.0
     origin_record_period: int = -1
     low_resource_origin: bool = False
     origin_family_income_to_basket_ratio: float = 0.0
@@ -214,7 +229,10 @@ class Government:
     treasury_cash: float = 0.0
     bank_id: int = 0
     debt_outstanding: float = 0.0
+    public_capital_stock: float = 0.0
     tax_revenue_this_period: float = 0.0
+    labor_tax_revenue: float = 0.0
+    payroll_tax_revenue: float = 0.0
     corporate_tax_revenue: float = 0.0
     dividend_tax_revenue: float = 0.0
     wealth_tax_revenue: float = 0.0
@@ -226,6 +244,8 @@ class Government:
     education_spending_this_period: float = 0.0
     school_public_spending_this_period: float = 0.0
     university_public_spending_this_period: float = 0.0
+    public_administration_spending_this_period: float = 0.0
+    infrastructure_spending_this_period: float = 0.0
     bond_issuance_this_period: float = 0.0
     deficit_this_period: float = 0.0
     surplus_this_period: float = 0.0
@@ -257,6 +277,9 @@ class Firm:
     price_aggressiveness: float = 1.0
     cash_conservatism: float = 1.0
     market_share_ambition: float = 1.0
+    expansion_credit_appetite: float = 1.0
+    stability_sensitivity: float = 1.0
+    investment_animal_spirits: float = 1.0
     forecast_caution: float = 1.0
     active: bool = True
     bank_id: int = 0
@@ -266,6 +289,9 @@ class Firm:
     target_inventory: float = 0.0
     sales_this_period: float = 0.0
     sales_history: list[float] = field(default_factory=list)
+    expected_sales_history: list[float] = field(default_factory=list)
+    production_history: list[float] = field(default_factory=list)
+    inventory_batches: list[float] = field(default_factory=list)
     last_worker_count: int = 0
     last_sales: float = 0.0
     last_revenue: float = 0.0
@@ -277,6 +303,8 @@ class Firm:
     last_transport_cost: float = 0.0
     last_fixed_overhead: float = 0.0
     last_capital_charge: float = 0.0
+    last_inventory_carry_cost: float = 0.0
+    last_inventory_waste_cost: float = 0.0
     last_unit_cost: float = 0.0
     last_market_share: float = 0.0
     last_expected_sales: float = 0.0
@@ -285,6 +313,10 @@ class Firm:
     last_technology_investment: float = 0.0
     last_technology_gain: float = 0.0
     last_interest_cost: float = 0.0
+    labor_offer_rejections: int = 0
+    labor_offer_rejection_wage_floor: float = 0.0
+    last_labor_offer_rejections: int = 0
+    last_labor_offer_rejection_wage_floor: float = 0.0
     loan_balance: float = 0.0
     loan_delinquency_periods: int = 0
     loan_restructure_count: int = 0
@@ -362,6 +394,15 @@ class SimulationConfig:
     payout_ratio: float = 0.32
     investment_rate: float = 0.30
     cash_reserve_periods: float = 0.75
+    firm_interest_rate_neutral: float = 0.035
+    firm_investment_interest_sensitivity: float = 0.12
+    firm_macro_stability_investment_weight: float = 0.16
+    firm_expansion_credit_interest_sensitivity: float = 0.38
+    firm_expansion_credit_max_revenue_share: float = 0.30
+    firm_investment_knowledge_floor: float = 0.90
+    firm_investment_knowledge_ceiling: float = 1.18
+    firm_investment_knowledge_university_weight: float = 0.65
+    firm_investment_knowledge_skill_weight: float = 0.35
     bankruptcy_cash_threshold: float = -50.0
     bankruptcy_streak_limit: int = 5
     bankruptcy_grace_period: int = 2
@@ -371,6 +412,7 @@ class SimulationConfig:
     startup_firm_capital: float = 80.0
     startup_inventory_multiplier: float = 0.75
     startup_expected_sales_share: float = 0.65
+    inventory_carry_cost_share: float = 0.012
     firm_restart_package_multiplier: float = 0.1
     firm_restart_wealth_threshold: float = 1.0
     firm_restart_min_scale: float = 0.01
@@ -418,6 +460,7 @@ class SimulationConfig:
     initial_university_completion_share: float = 0.25
     startup_grace_periods: int = 2
     firm_learning_warmup_periods: int = 18
+    inventory_shelf_life_months: int = 6
     birth_interval_periods: int = 9
     partnership_affinity_buckets: int = 20
     partnership_base_match_probability: float = 0.08
@@ -512,8 +555,17 @@ class SimulationConfig:
     entrepreneur_vault_share: float = 0.02
     reservation_wage_adjustment_speed: float = 0.45
     reservation_wage_floor_share: float = 0.90
+    reservation_wage_reference_cushion_months: float = 2.5
+    reservation_wage_liquidity_discount_max: float = 0.22
+    reservation_wage_liquidity_premium_max: float = 0.10
     living_wage_bargaining_weight: float = 0.28
     essential_wage_bargaining_bonus: float = 0.10
+    labor_offer_rejection_catchup_share: float = 0.50
+    labor_offer_rejection_response_cap: float = 0.10
+    firm_market_memory_years: float = 3.0
+    firm_revealed_shortage_capacity_weight: float = 0.35
+    firm_revealed_shortage_investment_weight: float = 0.30
+    firm_revealed_shortage_entry_weight: float = 0.65
     firm_costing_scale_floor_share: float = 0.55
     government_enabled: bool = True
     government_corporate_tax_rate_low: float = 0.10
@@ -526,6 +578,12 @@ class SimulationConfig:
     government_dividend_tax_rate_high: float = 0.18
     government_dividend_bracket_low: float = 2.0
     government_dividend_bracket_high: float = 8.0
+    government_labor_tax_rate_low: float = 0.03
+    government_labor_tax_rate_mid: float = 0.08
+    government_labor_tax_rate_high: float = 0.14
+    government_labor_tax_bracket_low: float = 1.1
+    government_labor_tax_bracket_high: float = 2.1
+    government_payroll_tax_rate: float = 0.08
     government_wealth_tax_rate: float = 0.002
     government_wealth_tax_threshold_multiple: float = 24.0
     government_unemployment_benefit_share: float = 0.30
@@ -536,11 +594,30 @@ class SimulationConfig:
     public_university_budget_share: float = 0.015
     public_school_min_target_units: float = 0.65
     public_university_min_target_units: float = 0.32
+    public_school_support_package_share: float = 0.95
+    public_university_support_package_share: float = 0.88
+    public_education_low_resource_priority_bonus: float = 0.18
+    public_school_support_continuity_bonus: float = 0.15
+    public_university_support_continuity_bonus: float = 0.28
     adult_school_catchup_target_units: float = 0.30
     adult_university_catchup_target_units: float = 0.20
+    government_structural_procurement_budget_share: float = 0.00
+    public_administration_budget_share: float = 0.06
+    government_infrastructure_budget_share: float = 0.015
+    public_administration_wage_premium: float = 0.10
+    public_administration_payroll_share: float = 0.65
+    public_administration_employment_floor_share: float = 0.015
+    public_administration_employment_state_size_sensitivity: float = 0.16
+    public_administration_employment_cap_share: float = 0.06
+    government_final_consumption_floor_share_gdp: float = 0.10
     government_procurement_price_sensitivity: float = 0.85
     government_spending_scale: float = 1.00
     government_spending_efficiency: float = 0.95
+    government_structural_deficit_tolerance: float = 0.25
+    government_public_capital_depreciation_rate: float = 0.0025
+    government_public_capital_productivity_gain: float = 0.035
+    government_public_capital_transport_gain: float = 0.060
+    government_public_capital_scale: float = 600.0
     government_countercyclical_enabled: bool = True
     government_recession_unemployment_buffer: float = 0.03
     government_recession_output_gap_threshold: float = 0.05
@@ -595,6 +672,11 @@ class PeriodSnapshot:
     essential_demand_units: float
     essential_production_units: float
     essential_sales_units: float
+    essential_total_sales_units: float
+    essential_government_sales_units: float
+    essential_inventory_units: float
+    essential_target_inventory_units: float
+    essential_expected_sales_units: float
     essential_fulfillment_rate: float
     people_full_essential_coverage: int
     full_essential_coverage_share: float
@@ -675,9 +757,12 @@ class PeriodSnapshot:
     worker_liquid_share: float
     goods_monetary_mass: float
     price_index: float
+    gdp_deflator: float
     government_treasury_cash: float
     government_debt_outstanding: float
     government_tax_revenue: float
+    government_labor_tax_revenue: float
+    government_payroll_tax_revenue: float
     government_corporate_tax_revenue: float
     government_dividend_tax_revenue: float
     government_wealth_tax_revenue: float
@@ -689,6 +774,12 @@ class PeriodSnapshot:
     government_education_spending: float
     government_school_spending: float
     government_university_spending: float
+    government_school_units: float
+    government_university_units: float
+    school_average_price: float
+    university_average_price: float
+    government_public_administration_spending: float
+    government_infrastructure_spending: float
     government_bond_issuance: float
     government_deficit: float
     government_surplus: float
@@ -716,6 +807,8 @@ class PeriodSnapshot:
     government_spending_share_gdp: float
     dividend_share_gdp: float
     retained_profit_share_gdp: float
+    firm_expansion_credit_creation: float
+    investment_knowledge_multiplier: float
     central_bank_money_supply: float
     central_bank_target_money_supply: float
     central_bank_policy_rate: float
@@ -757,6 +850,9 @@ class PeriodSnapshot:
     money_velocity: float
     total_liquid_money: float
     total_household_savings: float
+    public_capital_stock: float
+    public_infrastructure_productivity_multiplier: float
+    public_infrastructure_transport_cost_multiplier: float
 
 
 @dataclass

@@ -77,10 +77,12 @@ COLUMN_LABELS = {
     "worker_savings_rate": "Tasa agregada de ahorro voluntario",
     "worker_involuntary_retention_rate": "Tasa de retencion por racionamiento",
     "worker_consumption_share_gdp": "Consumo trabajador / PIB",
+    "worker_mpc_realized": "Propension marginal a consumir trabajadora",
+    "worker_mpc_5y_avg": "Propension marginal a consumir trabajadora (promedio 5 anos)",
     "household_final_consumption": "Consumo final de hogares",
     "household_final_consumption_share_gdp": "Consumo final de hogares / PIB",
-    "government_final_consumption": "Consumo final del gobierno",
-    "government_final_consumption_share_gdp": "Consumo final del gobierno / PIB",
+    "government_final_consumption": "Consumo final del gobierno (SNA)",
+    "government_final_consumption_share_gdp": "Consumo final del gobierno / PIB (SNA)",
     "gross_fixed_capital_formation": "Formacion bruta de capital fijo",
     "gross_fixed_capital_formation_share_gdp": "Formacion bruta de capital fijo / PIB",
     "change_in_inventories": "Cambio en inventarios",
@@ -142,7 +144,12 @@ COLUMN_LABELS = {
     "demand_fulfillment_rate": "Cobertura de demanda",
     "essential_demand_units": "Demanda basica necesaria",
     "essential_production_units": "Bienes necesarios producidos",
-    "essential_sales_units": "Compras basicas realizadas",
+    "essential_sales_units": "Compras basicas de hogares",
+    "essential_total_sales_units": "Compras basicas totales",
+    "essential_government_sales_units": "Compras publicas basicas",
+    "essential_inventory_units": "Inventario basico",
+    "essential_target_inventory_units": "Inventario objetivo basico",
+    "essential_expected_sales_units": "Ventas esperadas basicas",
     "essential_fulfillment_rate": "Cobertura de bienes basicos",
     "people_full_essential_coverage": "Personas con canasta esencial completa",
     "full_essential_coverage_share": "Poblacion con canasta esencial completa",
@@ -158,10 +165,13 @@ COLUMN_LABELS = {
     "university_age_population": "Poblacion elegible para universidad",
     "school_students": "Estudiantes escolares",
     "university_students": "Estudiantes universitarios",
-    "school_enrollment_share": "Matricula escolar",
+    "school_enrollment_share": "Ninos estudiando / ninos totales",
+    "children_studying_ratio": "Ninos estudiando / ninos totales",
     "university_enrollment_share": "Matricula universitaria",
-    "school_completion_share": "Adultos con escolaridad completa",
-    "university_completion_share": "Adultos con titulo universitario",
+    "school_completion_share": "Adultos con escolaridad completa / adultos totales",
+    "adults_with_school_credential_ratio": "Adultos con escolaridad completa / adultos totales",
+    "university_completion_share": "Adultos con titulo universitario / adultos totales",
+    "adults_with_university_credential_ratio": "Adultos con titulo universitario / adultos totales",
     "school_labor_share": "Fuerza laboral con escolaridad completa",
     "skilled_labor_share": "Fuerza laboral universitaria",
     "low_resource_school_enrollment_share": "Matricula escolar desde hogares bajo canasta",
@@ -216,6 +226,8 @@ COLUMN_LABELS = {
     "government_treasury_cash": "Caja del Estado",
     "government_debt_outstanding": "Deuda publica",
     "government_tax_revenue": "Recaudacion fiscal",
+    "government_labor_tax_revenue": "Impuesto al trabajo",
+    "government_payroll_tax_revenue": "Contribuciones sobre nomina",
     "government_corporate_tax_revenue": "Impuesto corporativo",
     "government_dividend_tax_revenue": "Impuesto a dividendos",
     "government_wealth_tax_revenue": "Impuesto a riqueza",
@@ -228,11 +240,21 @@ COLUMN_LABELS = {
     "government_education_spending": "Gasto publico educativo",
     "government_school_spending": "Gasto publico escolar",
     "government_university_spending": "Gasto publico universitario",
+    "government_school_units": "Unidades escolares publicas",
+    "government_university_units": "Unidades universitarias publicas",
+    "school_average_price": "Precio promedio escolar privado",
+    "university_average_price": "Precio promedio universitario privado",
+    "government_school_unit_cost": "Costo unitario escuela publica",
+    "government_university_unit_cost": "Costo unitario universidad publica",
+    "government_school_unit_cost_ratio_private_price": "Costo unitario escuela publica / precio privado",
+    "government_university_unit_cost_ratio_private_price": "Costo unitario universidad publica / precio privado",
     "government_bond_issuance": "Emision de bonos publicos",
     "government_deficit": "Deficit fiscal",
     "government_deficit_share_gdp": "Deficit fiscal / PIB",
     "government_surplus": "Superavit fiscal",
     "government_tax_burden_gdp": "Carga tributaria / PIB",
+    "government_labor_tax_burden_gdp": "Impuesto al trabajo / PIB",
+    "government_payroll_tax_burden_gdp": "Contribuciones sobre nomina / PIB",
     "government_corporate_tax_burden_gdp": "Impuesto corporativo / PIB",
     "government_dividend_tax_burden_gdp": "Impuesto a dividendos / PIB",
     "government_wealth_tax_burden_gdp": "Impuesto a riqueza / PIB",
@@ -240,7 +262,7 @@ COLUMN_LABELS = {
     "profit_share_gdp": "Participacion de ganancias en el PIB",
     "investment_share_gdp": "Inversion empresarial interna / PIB",
     "capitalist_consumption_share_gdp": "Consumo capitalista / PIB",
-    "government_spending_share_gdp": "Gasto estatal / PIB",
+    "government_spending_share_gdp": "Gasto total del Estado / PIB",
     "dividend_share_gdp": "Dividendos / PIB",
     "retained_profit_share_gdp": "Ganancia retenida / PIB",
     "central_bank_money_supply": "Oferta monetaria",
@@ -631,6 +653,14 @@ def render_policy_controls(
             value=float(defaults["government_spending_efficiency"]),
             step=0.05,
             key=f"{prefix}_spend_eff",
+        )
+        values["government_final_consumption_floor_share_gdp"] = st.slider(
+            "Piso de consumo final del gobierno / PIB (SNA)",
+            min_value=0.0,
+            max_value=0.50,
+            value=float(defaults["government_final_consumption_floor_share_gdp"]),
+            step=0.01,
+            key=f"{prefix}_gov_final_floor",
         )
         values["government_unemployment_benefit_share"] = st.slider(
             "Seguro de desempleo",
@@ -1588,11 +1618,26 @@ result, history_df = run_model(
 )
 selected_period = min(st.session_state.view_period, total_months)
 history_view_df = history_df[history_df["period"] <= selected_period].copy()
+worker_cash_available = history_view_df["worker_cash_available"].replace(0.0, pd.NA)
+history_view_df["worker_mpc_realized"] = (
+    history_view_df["worker_consumption_spending"] / worker_cash_available
+).clip(lower=0.0, upper=1.0).fillna(0.0)
+history_view_df["worker_mpc_5y_avg"] = history_view_df["worker_mpc_realized"].rolling(
+    window=max(1, 5 * PERIODS_PER_YEAR),
+    min_periods=1,
+).mean()
 history_view = make_unique_columns(
     history_view_df.drop(columns=HIDDEN_HISTORY_COLUMNS, errors="ignore").rename(columns=COLUMN_LABELS)
 )
 
 latest_period = history_view_df.iloc[-1] if not history_view_df.empty else None
+worker_mpc_5y = 0.0
+if not history_view_df.empty:
+    worker_mpc_window = history_view_df.tail(max(1, 5 * PERIODS_PER_YEAR))
+    worker_cash_window = float(worker_mpc_window["worker_cash_available"].sum())
+    worker_consumption_window = float(worker_mpc_window["worker_consumption_spending"].sum())
+    if worker_cash_window > 0.0:
+        worker_mpc_5y = max(0.0, min(1.0, worker_consumption_window / worker_cash_window))
 monthly_gdp_delta = fmt_delta(latest_period["gdp_growth"]) if latest_period is not None else None
 monthly_population_delta = fmt_delta(latest_period["population_growth"]) if latest_period is not None else None
 
@@ -1640,7 +1685,7 @@ if CORE_DASHBOARD_ONLY:
     with metric_cols_4[0]:
         st.metric("Bienes necesarios producidos", f"{latest_period['essential_production_units']:.0f}")
     with metric_cols_4[1]:
-        st.metric("Bienes necesarios comprados", f"{latest_period['essential_sales_units']:.0f}")
+        st.metric("Bienes necesarios comprados", f"{latest_period['essential_total_sales_units']:.0f}")
     with metric_cols_4[2]:
         st.metric("Patrimonio bancario", money(latest_period["bank_equity"]))
     with metric_cols_4[3]:
@@ -1725,8 +1770,12 @@ if CORE_DASHBOARD_ONLY:
                 make_line_chart(
                     history_view_df,
                     x="period",
-                    y_cols=["essential_production_units", "essential_sales_units", "essential_demand_units"],
-                    title="Bienes necesarios producidos vs comprados",
+                    y_cols=[
+                        "essential_production_units",
+                        "essential_total_sales_units",
+                        "essential_demand_units",
+                    ],
+                    title="Bienes necesarios: produccion, comprados totales y necesidad",
                     y_title="Unidades",
                 ),
                 use_container_width=True,
@@ -1749,6 +1798,78 @@ if CORE_DASHBOARD_ONLY:
                 use_container_width=True,
             )
             st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown('<div class="panel">', unsafe_allow_html=True)
+        st.subheader("Descomposicion del sesgo de sobreproduccion esencial")
+        st.caption(
+            "Aqui se separa lo que compran los hogares, lo que absorbe el gobierno y el exceso que termina "
+            "como inventario frente al inventario objetivo y a las ventas esperadas del sector esencial."
+        )
+        bias_cols = st.columns(5)
+        with bias_cols[0]:
+            gap_vs_households = latest_period["essential_production_units"] - latest_period["essential_sales_units"]
+            st.metric("Produccion - compras hogar", f"{gap_vs_households:.0f}")
+        with bias_cols[1]:
+            public_basic = latest_period.get("essential_government_sales_units", 0.0)
+            st.metric("Compras publicas basicas", f"{public_basic:.0f}")
+        with bias_cols[2]:
+            inventory_gap = latest_period.get("essential_inventory_units", 0.0) - latest_period.get(
+                "essential_target_inventory_units",
+                0.0,
+            )
+            st.metric("Inventario - objetivo", f"{inventory_gap:.0f}")
+        with bias_cols[3]:
+            expected_gap = latest_period.get("essential_expected_sales_units", 0.0) - latest_period.get(
+                "essential_total_sales_units",
+                0.0,
+            )
+            st.metric("Esperado - ventas totales", f"{expected_gap:.0f}")
+        with bias_cols[4]:
+            st.metric("PMC trabajadora prom. 5 anos", pct(worker_mpc_5y))
+
+        bias_left, bias_right = st.columns(2)
+        with bias_left:
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "essential_inventory_units",
+                        "essential_target_inventory_units",
+                        "essential_expected_sales_units",
+                    ],
+                    title="Inventario esencial, objetivo y ventas esperadas",
+                    y_title="Unidades",
+                ),
+                use_container_width=True,
+            )
+        with bias_right:
+            st.plotly_chart(
+                make_line_chart(
+                    history_view_df,
+                    x="period",
+                    y_cols=[
+                        "essential_government_sales_units",
+                        "essential_sales_units",
+                        "essential_total_sales_units",
+                    ],
+                    title="Absorcion esencial: hogares vs gobierno",
+                    y_title="Unidades",
+                ),
+                use_container_width=True,
+            )
+
+        st.plotly_chart(
+            make_line_chart(
+                history_view_df,
+                x="period",
+                y_cols=["worker_mpc_realized", "worker_mpc_5y_avg", "worker_savings_rate"],
+                title="Demanda trabajadora: consumo marginal y ahorro voluntario",
+                y_title="Proporcion",
+            ),
+            use_container_width=True,
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
         st.markdown('<div class="panel">', unsafe_allow_html=True)
         st.plotly_chart(
