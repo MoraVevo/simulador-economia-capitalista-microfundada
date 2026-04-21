@@ -16,6 +16,7 @@ from .domain import (
     SECTOR_BY_KEY,
     SECTOR_SPECS,
     Entrepreneur,
+    FamilyPeriodSnapshot,
     Firm,
     FirmPeriodSnapshot,
     Government,
@@ -58,8 +59,14 @@ class EconomySimulation:
             int, tuple[tuple[int, float, int, int], float]
         ] = {}
         self._period_living_wage_anchor_cache: float | None = None
+        self._period_family_cash_available: dict[int, float] = {}
+        self._period_family_cash_saved: dict[int, float] = {}
+        self._period_family_cash_spent: dict[int, float] = {}
+        self._period_family_voluntary_saved_cash: dict[int, float] = {}
+        self._period_family_involuntary_retained_cash: dict[int, float] = {}
         self.history: list[PeriodSnapshot] = []
         self.firm_history: list[FirmPeriodSnapshot] = []
+        self.family_history: list[FamilyPeriodSnapshot] = []
         self._sector_sales_history = {spec.key: [] for spec in SECTOR_SPECS}
         self._sector_revealed_unmet_history = {spec.key: [] for spec in SECTOR_SPECS}
         self.households = self._build_households()
@@ -137,6 +144,15 @@ class EconomySimulation:
         self._period_worker_cash_saved = 0.0
         self._period_worker_voluntary_saved = 0.0
         self._period_worker_involuntary_retained = 0.0
+        self._period_firm_starting_workers = {firm.id: len(firm.workers) for firm in self.firms}
+        self._period_firm_exited_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_firm_quit_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_firm_dismissed_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_family_cash_available = {}
+        self._period_family_cash_saved = {}
+        self._period_family_cash_spent = {}
+        self._period_family_voluntary_saved_cash = {}
+        self._period_family_involuntary_retained_cash = {}
         self._period_household_credit_issued = 0.0
         self._period_firm_credit_issued = 0.0
         self._period_firm_expansion_credit_issued = 0.0
@@ -209,6 +225,7 @@ class EconomySimulation:
             central_bank=self.central_bank,
             banks=self.banks,
             government=self.government,
+            family_history=self.family_history,
         )
 
     def step(self) -> PeriodSnapshot:
@@ -217,13 +234,13 @@ class EconomySimulation:
         self._refresh_period_household_caches()
         self._refresh_period_sector_caches()
         self._reset_household_labor_state()
+        last_unemployment = self.history[-1].unemployment_rate if self.history else 0.12
+        self._update_household_employment_insecurity(last_unemployment)
         self._age_employment_contracts()
         self._advance_credit_state_timers()
         self._refresh_family_links()
         self._refresh_period_family_cache()
         self._update_household_reservation_wages()
-
-        last_unemployment = self.history[-1].unemployment_rate if self.history else 0.12
         self._update_firm_policies(last_unemployment)
         self._refresh_period_sector_caches()
         self._align_existing_workforce()
@@ -255,6 +272,8 @@ class EconomySimulation:
         self.history.append(snapshot)
         if self.config.track_firm_history:
             self.firm_history.extend(self._build_firm_period_snapshots())
+        if self.config.track_family_history:
+            self.family_history.extend(self._build_family_period_snapshots())
         return snapshot
 
     def _reset_period_counters(self) -> None:
@@ -284,6 +303,15 @@ class EconomySimulation:
         self._period_worker_cash_saved = 0.0
         self._period_worker_voluntary_saved = 0.0
         self._period_worker_involuntary_retained = 0.0
+        self._period_firm_starting_workers = {firm.id: len(firm.workers) for firm in self.firms}
+        self._period_firm_exited_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_firm_quit_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_firm_dismissed_worker_ids = {firm.id: set() for firm in self.firms}
+        self._period_family_cash_available = {}
+        self._period_family_cash_saved = {}
+        self._period_family_cash_spent = {}
+        self._period_family_voluntary_saved_cash = {}
+        self._period_family_involuntary_retained_cash = {}
         self._period_household_credit_issued = 0.0
         self._period_firm_credit_issued = 0.0
         self._period_firm_expansion_credit_issued = 0.0
@@ -679,14 +707,121 @@ class EconomySimulation:
         anchor = self._living_wage_anchor() if living_wage_anchor is None else living_wage_anchor
         return anchor * (self.config.reservation_wage_floor_share + self._sector_wage_floor_premium(sector_key))
 
-    def _release_household_from_employment(self, household: Household) -> None:
+    def _release_household_from_employment(self, household: Household, *, exit_reason: str = "dismissal") -> None:
         firm_id = household.employed_by
         if firm_id is not None:
+            if firm_id != PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+                exited_workers = self._period_firm_exited_worker_ids.setdefault(firm_id, set())
+                exited_workers.add(household.id)
+                if exit_reason == "quit":
+                    quit_workers = self._period_firm_quit_worker_ids.setdefault(firm_id, set())
+                    quit_workers.add(household.id)
+                else:
+                    dismissed_workers = self._period_firm_dismissed_worker_ids.setdefault(firm_id, set())
+                    dismissed_workers.add(household.id)
             firm = self.firm_by_id.get(firm_id)
             if firm is not None:
                 firm.workers = [worker_id for worker_id in firm.workers if worker_id != household.id]
         household.employed_by = None
+        household.contract_wage = 0.0
+        household.pending_employer_id = None
+        household.pending_contract_wage = 0.0
         household.employment_tenure = 0
+
+    def _assign_household_to_employer(
+        self,
+        household: Household,
+        employer_id: int,
+        wage_offer: float,
+        *,
+        starting_tenure: int = 0,
+    ) -> None:
+        if employer_id == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+            household.employed_by = PUBLIC_ADMINISTRATION_EMPLOYER_ID
+        else:
+            firm = self.firm_by_id[employer_id]
+            if household.id not in firm.workers:
+                firm.workers.append(household.id)
+            household.employed_by = employer_id
+        household.contract_wage = max(0.0, wage_offer)
+        household.pending_employer_id = None
+        household.pending_contract_wage = 0.0
+        household.employment_tenure = max(0, starting_tenure)
+
+    def _renew_household_contract(self, household: Household, wage_offer: float) -> None:
+        household.contract_wage = max(0.0, wage_offer)
+        household.pending_employer_id = None
+        household.pending_contract_wage = 0.0
+        household.employment_tenure = 0
+
+    def _household_current_contract_wage(self, household: Household, fallback_wage: float = 0.0) -> float:
+        if household.contract_wage > 0.0:
+            return household.contract_wage
+        return max(0.0, fallback_wage)
+
+    def _clear_household_pending_offer(self, household: Household) -> None:
+        household.pending_employer_id = None
+        household.pending_contract_wage = 0.0
+
+    def _household_notice_window_open(self, household: Household) -> bool:
+        if household.employed_by is None:
+            return False
+        contract_periods = max(1, self.config.employment_contract_periods)
+        notice_periods = clamp(self.config.contract_notice_periods, 1, contract_periods)
+        return household.employment_tenure >= max(0, contract_periods - int(notice_periods))
+
+    def _firm_reserved_future_hires(self, firm_id: int) -> int:
+        return sum(
+            1
+            for household in self._active_households()
+            if household.pending_employer_id == firm_id
+        )
+
+    def _household_pending_offer(
+        self,
+        household: Household,
+        reserved_future_hires_by_firm: dict[int, int] | None = None,
+    ) -> tuple[int, float] | None:
+        pending_employer_id = household.pending_employer_id
+        pending_wage = household.pending_contract_wage
+        if pending_employer_id is None or pending_wage <= 0.0:
+            return None
+        if pending_employer_id == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+            if not self.config.government_enabled:
+                if reserved_future_hires_by_firm is not None:
+                    reserved_future_hires_by_firm[pending_employer_id] = max(
+                        0,
+                        reserved_future_hires_by_firm.get(pending_employer_id, 0) - 1,
+                    )
+                self._clear_household_pending_offer(household)
+                return None
+            return pending_employer_id, pending_wage
+        pending_firm = self.firm_by_id.get(pending_employer_id)
+        if pending_firm is None or not pending_firm.active:
+            if reserved_future_hires_by_firm is not None:
+                reserved_future_hires_by_firm[pending_employer_id] = max(
+                    0,
+                    reserved_future_hires_by_firm.get(pending_employer_id, 0) - 1,
+                )
+            self._clear_household_pending_offer(household)
+            return None
+        live_workers = len(pending_firm.workers)
+        reserved_hires = (
+            reserved_future_hires_by_firm.get(pending_firm.id, 0)
+            if reserved_future_hires_by_firm is not None
+            else self._firm_reserved_future_hires(pending_firm.id)
+        )
+        if household.pending_employer_id == pending_firm.id:
+            reserved_hires -= 1
+        if live_workers + max(0, reserved_hires) >= self._firm_hiring_capacity(pending_firm):
+            if reserved_future_hires_by_firm is not None:
+                reserved_future_hires_by_firm[pending_firm.id] = max(
+                    0,
+                    reserved_future_hires_by_firm.get(pending_firm.id, 0) - 1,
+                )
+            self._clear_household_pending_offer(household)
+            return None
+        return pending_firm.id, pending_wage
 
     def _firm_hiring_capacity(self, firm: Firm) -> int:
         return max(0, firm.desired_workers)
@@ -759,38 +894,205 @@ class EconomySimulation:
                 best_wage = firm.wage_offer
         return best_wage
 
+    def _best_available_employment_offer(
+        self,
+        household: Household,
+        current_employer_id: int,
+        *,
+        allowed_sectors: set[str] | None = None,
+    ) -> tuple[int, float] | None:
+        best_offer: tuple[int, float] | None = None
+        for firm in self.firms:
+            if not firm.active or firm.id == current_employer_id:
+                continue
+            if allowed_sectors is not None and firm.sector not in allowed_sectors:
+                continue
+            if len(firm.workers) + self._firm_reserved_future_hires(firm.id) >= self._firm_hiring_capacity(firm):
+                continue
+            if self._worker_effective_labor_for_sector(household, firm.sector) <= 0.0:
+                continue
+            if best_offer is None or firm.wage_offer > best_offer[1]:
+                best_offer = (firm.id, firm.wage_offer)
+        return best_offer
+
+    def _labor_market_switch_fog(self, unemployment_rate: float | None = None) -> float:
+        if unemployment_rate is None:
+            unemployment_rate = self.history[-1].unemployment_rate if self.history else max(
+                self.config.target_unemployment,
+                0.12,
+            )
+        recent = self._recent_snapshots()
+        recent_unemployment = [snapshot.unemployment_rate for snapshot in recent] if recent else []
+        volatility = (
+            max(recent_unemployment) - min(recent_unemployment)
+            if len(recent_unemployment) >= 2
+            else max(0.0, unemployment_rate - self.config.target_unemployment)
+        )
+        return clamp(
+            0.75 * unemployment_rate / 0.28
+            + 0.25 * volatility / 0.08,
+            0.0,
+            1.35,
+        )
+
+    def _update_household_employment_insecurity(self, unemployment_rate: float) -> None:
+        market_fog = self._labor_market_switch_fog(unemployment_rate)
+        for household in self._active_households():
+            if self._household_labor_capacity(household) <= 0.0:
+                household.employment_insecurity_memory = clamp(
+                    0.92 * household.employment_insecurity_memory,
+                    0.0,
+                    2.0,
+                )
+                continue
+            insecurity_shock = 0.0
+            if household.employed_by is None:
+                insecurity_shock += 0.15 + 0.28 * market_fog
+            insecurity_shock += 0.06 * household.deprivation_streak
+            insecurity_shock += 0.08 * household.severe_hunger_streak
+            insecurity_shock += 0.04 * household.health_fragility
+            recovery = 0.10 if household.employed_by is not None else 0.0
+            household.employment_insecurity_memory = clamp(
+                0.84 * household.employment_insecurity_memory + insecurity_shock - recovery,
+                0.0,
+                2.0,
+            )
+
+    def _household_job_switch_probability(
+        self,
+        household: Household,
+        *,
+        current_wage: float,
+        offered_wage: float,
+        unemployment_rate: float,
+        has_concrete_offer: bool,
+    ) -> float:
+        if offered_wage <= 0.0 or current_wage <= 0.0:
+            return 0.0
+        if not has_concrete_offer:
+            return 0.0
+        reservation_gap = (offered_wage - household.reservation_wage) / max(1.0, household.reservation_wage)
+        if reservation_gap < -0.02:
+            return 0.0
+        wage_premium = (offered_wage - current_wage) / max(1.0, current_wage)
+        market_fog = self._labor_market_switch_fog(unemployment_rate)
+        discomfort = clamp(
+            household.job_change_aversion + 0.70 * household.employment_insecurity_memory,
+            0.0,
+            2.25,
+        )
+        tenure_share = household.employment_tenure / max(1.0, self.config.employment_contract_periods)
+        score = (
+            -2.25
+            + 5.60 * clamp(wage_premium, -0.20, 0.80)
+            + 1.40 * clamp(reservation_gap, -0.20, 0.60)
+            - 1.55 * discomfort
+            - 1.30 * market_fog
+            - 0.30 * clamp(tenure_share, 0.0, 1.5)
+            - 0.25 * household.health_fragility
+        )
+        probability = 1.0 / (1.0 + math.exp(-score))
+        return clamp(probability, 0.0, 0.98)
+
     def _age_employment_contracts(self) -> None:
         contract_periods = max(1, self.config.employment_contract_periods)
+        last_unemployment = self.history[-1].unemployment_rate if self.history else 0.12
         active_households = self._active_households()
         for household in active_households:
             if household.employed_by is None:
+                self._clear_household_pending_offer(household)
                 continue
             if household.employed_by == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
                 household.employment_tenure += 1
-                if household.employment_tenure >= contract_periods:
-                    best_wage = self._best_available_wage_offer(PUBLIC_ADMINISTRATION_EMPLOYER_ID)
-                    public_wage = self._public_administration_wage_offer()
-                    if best_wage is None or best_wage <= public_wage:
-                        household.employment_tenure = 0
+                public_wage = self._public_administration_wage_offer()
+                if household.employment_tenure < contract_periods:
+                    if household.pending_employer_id == PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+                        self._clear_household_pending_offer(household)
+                    if household.contract_wage <= 0.0:
+                        household.contract_wage = public_wage
+                    continue
+                pending_offer = self._household_pending_offer(household)
+                switched = False
+                if pending_offer is not None and pending_offer[0] != PUBLIC_ADMINISTRATION_EMPLOYER_ID:
+                    next_employer_id, offered_wage = pending_offer
+                    if offered_wage >= household.reservation_wage:
+                        self._release_household_from_employment(household, exit_reason="quit")
+                        self._assign_household_to_employer(household, next_employer_id, offered_wage)
+                        switched = True
+                if switched:
+                    continue
+                best_offer = self._best_available_employment_offer(
+                    household,
+                    PUBLIC_ADMINISTRATION_EMPLOYER_ID,
+                )
+                current_wage = self._household_current_contract_wage(household, public_wage)
+                if best_offer is not None:
+                    next_employer_id, offered_wage = best_offer
+                    switch_probability = self._household_job_switch_probability(
+                        household,
+                        current_wage=current_wage,
+                        offered_wage=offered_wage,
+                        unemployment_rate=last_unemployment,
+                        has_concrete_offer=True,
+                    )
+                    if (
+                        offered_wage >= household.reservation_wage
+                        and self.rng.random() < switch_probability
+                    ):
+                        self._release_household_from_employment(household, exit_reason="quit")
+                        self._assign_household_to_employer(household, next_employer_id, offered_wage)
                         continue
-                    self._release_household_from_employment(household)
+                self._renew_household_contract(household, max(current_wage, public_wage))
                 continue
             firm = self.firm_by_id.get(household.employed_by)
             if firm is None or not firm.active:
                 self._release_household_from_employment(household)
                 continue
             household.employment_tenure += 1
-            if household.employment_tenure >= contract_periods:
-                current_capacity = self._firm_hiring_capacity(firm)
-                if len(firm.workers) <= current_capacity:
-                    allowed_sectors = None
-                    if self._in_essential_protection() and firm.sector in ESSENTIAL_SECTOR_KEYS:
-                        allowed_sectors = set(ESSENTIAL_SECTOR_KEYS)
-                    best_wage = self._best_available_wage_offer(firm.id, allowed_sectors=allowed_sectors)
-                    if best_wage is None or best_wage <= firm.wage_offer:
-                        household.employment_tenure = 0
+            if household.contract_wage <= 0.0:
+                household.contract_wage = firm.wage_offer
+            if household.employment_tenure < contract_periods:
+                continue
+            current_capacity = self._firm_hiring_capacity(firm)
+            current_wage = self._household_current_contract_wage(household, firm.wage_offer)
+            allowed_sectors = None
+            if self._in_essential_protection() and firm.sector in ESSENTIAL_SECTOR_KEYS:
+                allowed_sectors = set(ESSENTIAL_SECTOR_KEYS)
+            pending_offer = self._household_pending_offer(household)
+            switched = False
+            if pending_offer is not None and pending_offer[0] != household.employed_by:
+                next_employer_id, offered_wage = pending_offer
+                if offered_wage >= household.reservation_wage:
+                    self._release_household_from_employment(household, exit_reason="quit")
+                    self._assign_household_to_employer(household, next_employer_id, offered_wage)
+                    switched = True
+            if switched:
+                continue
+            if len(firm.workers) <= current_capacity:
+                best_offer = self._best_available_employment_offer(
+                    household,
+                    firm.id,
+                    allowed_sectors=allowed_sectors,
+                )
+                if best_offer is not None:
+                    next_employer_id, offered_wage = best_offer
+                    switch_probability = self._household_job_switch_probability(
+                        household,
+                        current_wage=current_wage,
+                        offered_wage=offered_wage,
+                        unemployment_rate=last_unemployment,
+                        has_concrete_offer=True,
+                    )
+                    if (
+                        offered_wage >= household.reservation_wage
+                        and self.rng.random() < switch_probability
+                    ):
+                        self._release_household_from_employment(household, exit_reason="quit")
+                        self._assign_household_to_employer(household, next_employer_id, offered_wage)
                         continue
-                self._release_household_from_employment(household)
+                self._renew_household_contract(household, max(current_wage, firm.wage_offer))
+                continue
+            self._release_household_from_employment(household)
 
     def _align_existing_workforce(self) -> None:
         for firm in self.firms:
@@ -3020,8 +3322,11 @@ class EconomySimulation:
         candidates.sort(key=self._public_administration_worker_score, reverse=True)
         vacancies = target_workers - len(public_workers)
         for household in candidates[:vacancies]:
-            household.employed_by = PUBLIC_ADMINISTRATION_EMPLOYER_ID
-            household.employment_tenure = 0
+            self._assign_household_to_employer(
+                household,
+                PUBLIC_ADMINISTRATION_EMPLOYER_ID,
+                wage_offer,
+            )
 
     def _pay_public_administration_wages(self) -> float:
         if not self.config.government_enabled:
@@ -3034,7 +3339,10 @@ class EconomySimulation:
         if not public_workers:
             return 0.0
         wage_offer = self._public_administration_wage_offer()
-        planned_payroll = wage_offer * len(public_workers)
+        planned_payroll = sum(
+            self._household_current_contract_wage(household, wage_offer)
+            for household in public_workers
+        )
         administration_budget = self._public_administration_budget()
         nonpayroll_budget = max(0.0, administration_budget - self._public_administration_payroll_budget())
         planned_total_spending = planned_payroll + nonpayroll_budget
@@ -3046,9 +3354,10 @@ class EconomySimulation:
         affordable_scale = min(1.0, self.government.treasury_cash / max(1e-9, planned_total_spending))
         if affordable_scale <= 0.0:
             return 0.0
-        effective_wage = wage_offer * affordable_scale
-        total_paid = effective_wage * len(public_workers)
+        total_paid = 0.0
         for household in public_workers:
+            contracted_wage = self._household_current_contract_wage(household, wage_offer)
+            effective_wage = contracted_wage * affordable_scale
             labor_tax = min(
                 effective_wage,
                 effective_wage * self._government_labor_tax_rate(effective_wage),
@@ -3056,6 +3365,7 @@ class EconomySimulation:
             net_wage = effective_wage - labor_tax
             household.wage_income += net_wage
             household.last_income += net_wage
+            total_paid += effective_wage
             if labor_tax > 0.0:
                 self._record_government_tax_revenue(labor_tax, "labor")
         self.government.treasury_cash = max(0.0, self.government.treasury_cash - total_paid)
@@ -5245,27 +5555,28 @@ class EconomySimulation:
                     id=self._next_household_id,
                     sex=self.rng.choice(("F", "M")),
                     savings=0.0,
-                reservation_wage=self.rng.uniform(
-                    self.config.newborn_reservation_wage_min,
-                    self.config.newborn_reservation_wage_max,
-                ),
-                saving_propensity=self.rng.uniform(0.02, 0.12),
-                higher_education_affinity=self.rng.random(),
-                money_trust=self.rng.uniform(0.40, 0.75),
-                consumption_impatience=self.rng.uniform(0.25, 0.85),
-                price_sensitivity=self.rng.uniform(0.7, 1.3),
-                need_scale=self.rng.uniform(0.9, 1.05),
-                sector_preference_weights=self._draw_household_sector_preference_weights(),
-                age_periods=0,
-                partnership_affinity_code=self._inherit_partnership_affinity_code(mother, father),
-                next_partnership_attempt_period=int(round(self.config.entry_age_years * self.config.periods_per_year)),
-                fertility_multiplier=self._draw_fertility_multiplier(),
-                bank_id=inherited_bank_id,
-                guardian_id=guardian.id,
-                mother_id=mother.id,
-                father_id=father.id if father is not None else None,
-                desired_children=self._draw_desired_children(),
-            )
+                    reservation_wage=self.rng.uniform(
+                        self.config.newborn_reservation_wage_min,
+                        self.config.newborn_reservation_wage_max,
+                    ),
+                    saving_propensity=self.rng.uniform(0.02, 0.12),
+                    higher_education_affinity=self.rng.random(),
+                    money_trust=self.rng.uniform(0.40, 0.75),
+                    consumption_impatience=self.rng.uniform(0.25, 0.85),
+                    price_sensitivity=self.rng.uniform(0.7, 1.3),
+                    need_scale=self.rng.uniform(0.9, 1.05),
+                    sector_preference_weights=self._draw_household_sector_preference_weights(),
+                    age_periods=0,
+                    partnership_affinity_code=self._inherit_partnership_affinity_code(mother, father),
+                    next_partnership_attempt_period=int(round(self.config.entry_age_years * self.config.periods_per_year)),
+                    fertility_multiplier=self._draw_fertility_multiplier(),
+                    job_change_aversion=self.rng.uniform(0.30, 0.90),
+                    bank_id=inherited_bank_id,
+                    guardian_id=guardian.id,
+                    mother_id=mother.id,
+                    father_id=father.id if father is not None else None,
+                    desired_children=self._draw_desired_children(),
+                )
         )
         for parent_id in parent_ids:
             parent = self._household_by_id(parent_id)
@@ -5704,6 +6015,71 @@ class EconomySimulation:
         productivity_floor: float = 0.1,
     ) -> int:
         return max(1, math.ceil(max(0.0, units) / max(productivity_floor, effective_productivity)))
+
+    def _target_headcount_for_expected_sales(
+        self,
+        firm: Firm,
+        expected_sales: float,
+        effective_productivity: float,
+        *,
+        target_inventory: float,
+    ) -> int:
+        if self._is_education_sector(firm.sector):
+            required_units = max(0.0, target_inventory)
+            raw_target_workers = self._workers_needed_for_units(
+                required_units,
+                effective_productivity,
+                productivity_floor=0.25,
+            )
+            current_capacity_units = max(0.25, effective_productivity) * max(0, len(firm.workers))
+            supply_pressure = required_units / max(1.0, current_capacity_units)
+        else:
+            required_units = self._firm_desired_output_from_expected_sales(firm, expected_sales)
+            raw_target_workers = self._workers_needed_for_units(required_units, effective_productivity)
+            current_capacity_units = max(0.1, effective_productivity) * max(0, len(firm.workers))
+            current_sales_capacity = max(0.0, firm.inventory) + current_capacity_units
+            supply_pressure = (max(0.0, expected_sales) + max(0.0, target_inventory)) / max(1.0, current_sales_capacity)
+
+        current_workers = max(0, len(firm.workers))
+        if raw_target_workers <= current_workers:
+            return raw_target_workers
+        if current_workers == 0 or firm.age <= 1:
+            return raw_target_workers
+
+        sales_pressure = max(
+            max(0.0, firm.last_sales),
+            self._smoothed_sales_reference(firm),
+        ) / max(
+            1.0,
+            max(firm.last_expected_sales, self._smoothed_expected_sales_reference(firm)),
+        )
+        capacity_utilization = firm.last_production / max(1.0, current_capacity_units)
+        sell_through = self._firm_recent_sell_through(firm)
+        revealed_shortage = self._sector_revealed_shortage_signal(firm.sector)
+        expansion_ready = (
+            supply_pressure > 1.03
+            and capacity_utilization > clamp(0.78 + 0.18 * firm.employment_inertia, 0.78, 0.96)
+            and (
+                sales_pressure > clamp(1.03 + 0.08 * firm.employment_inertia, 1.05, 1.12)
+                or sell_through > 0.98
+                or revealed_shortage > 0.18
+            )
+        )
+        if not expansion_ready:
+            return current_workers
+
+        max_growth_share = clamp(
+            0.26
+            - 0.12 * firm.employment_inertia
+            + 0.08 * max(0.0, sell_through - 0.95)
+            + 0.06 * revealed_shortage,
+            0.08,
+            0.30,
+        )
+        max_growth_workers = max(1, math.ceil(max(1, current_workers) * max_growth_share))
+        if firm.sector in ESSENTIAL_SECTOR_KEYS and revealed_shortage > 0.0:
+            max_growth_workers += 1
+        return min(raw_target_workers, current_workers + max_growth_workers)
 
     def _education_entry_package_estimate(
         self,
@@ -6457,7 +6833,19 @@ class EconomySimulation:
         rejection_pressure = self._firm_rejection_signal(firm) * self._firm_price_hike_sensitivity(firm)
         affordability_pressure = self._essential_affordability_pressure() if spec.key in ESSENTIAL_SECTOR_KEYS else 0.0
         learning_maturity = self._firm_learning_maturity(firm)
-        movement_scale = 0.35 + 0.65 * learning_maturity
+        min_history = max(1, int(self.config.price_adjustment_min_history))
+        history_depth = min(
+            len(firm.sales_history),
+            len(firm.expected_sales_history),
+            len(firm.production_history),
+        )
+        history_maturity = clamp(history_depth / min_history, 0.0, 1.0)
+        price_inertia = clamp(self.config.price_adjustment_inertia, 0.0, 0.95)
+        movement_scale = clamp(
+            (0.10 + 0.90 * learning_maturity * history_maturity) * (1.0 - 0.75 * price_inertia),
+            0.04,
+            0.55,
+        )
         penetration_allowed = (
             spec.key in ESSENTIAL_SECTOR_KEYS
             and inventory_ratio > 1.15
@@ -6574,6 +6962,14 @@ class EconomySimulation:
         learning_maturity = self._firm_learning_maturity(firm)
         uncertainty = self._firm_forecast_uncertainty(firm)
         caution = clamp(firm.forecast_caution, 0.60, 1.85)
+        min_history = max(1, int(self.config.price_adjustment_min_history))
+        history_depth = min(
+            len(firm.sales_history),
+            len(firm.expected_sales_history),
+            len(firm.production_history),
+        )
+        history_maturity = clamp(history_depth / min_history, 0.0, 1.0)
+        price_inertia = clamp(self.config.price_adjustment_inertia, 0.0, 0.95)
         smoothed_sales = self._smoothed_sales_reference(firm)
         smoothed_expected = self._smoothed_expected_sales_reference(firm)
         smoothed_production = self._smoothed_production_reference(firm)
@@ -6599,7 +6995,8 @@ class EconomySimulation:
             0.0,
             0.09,
         )
-        max_hike *= 0.30 + 0.70 * learning_maturity
+        max_hike *= (0.20 + 0.80 * learning_maturity * history_maturity)
+        max_hike *= clamp(1.0 - 0.60 * price_inertia, 0.15, 1.0)
         if firm.sector in ESSENTIAL_SECTOR_KEYS:
             max_hike = min(max_hike, 0.06)
         return 1.0 + max_hike
@@ -6914,7 +7311,15 @@ class EconomySimulation:
             - 0.05 * forecast_penalty
             - 0.08 * max(0.0, 0.85 - sell_through)
         )
-        expansion_allowance = clamp(expansion_allowance, 0.01, 0.18)
+        if firm.sector in ESSENTIAL_SECTOR_KEYS:
+            expansion_allowance += (
+                0.10 * revealed_shortage
+                + 0.08 * max(0.0, sell_through - 0.45)
+                + 0.05 * max(0.0, cash_cover - 0.60)
+            )
+            expansion_allowance = clamp(expansion_allowance, 0.03, 0.40)
+        else:
+            expansion_allowance = clamp(expansion_allowance, 0.01, 0.18)
         capturable_share = clamp(
             realized_share + min(share_gap, expansion_allowance),
             max(0.0025, realized_share),
@@ -6939,6 +7344,14 @@ class EconomySimulation:
             0.15,
             0.90,
         )
+        if firm.sector in ESSENTIAL_SECTOR_KEYS:
+            max_growth_rate = clamp(
+                max_growth_rate
+                + 0.20 * revealed_shortage
+                + 0.10 * max(0.0, cash_cover - 0.50),
+                0.25,
+                1.35,
+            )
         growth_limited_sales = max(1.0, proven_scale * (1.0 + max_growth_rate))
         return max(1.0, min(capturable_market_sales, growth_limited_sales))
 
@@ -7164,6 +7577,7 @@ class EconomySimulation:
                     consumption_impatience=self.rng.uniform(0.20, 0.80),
                     price_sensitivity=self.rng.uniform(0.6, 1.4),
                     need_scale=self.rng.uniform(0.9, 1.1),
+                    job_change_aversion=self.rng.uniform(0.25, 0.95),
                     sector_preference_weights=self._draw_household_sector_preference_weights(),
                     age_periods=age_periods,
                     partnership_affinity_code=self._draw_partnership_affinity_code(),
@@ -7341,7 +7755,12 @@ class EconomySimulation:
                 )
                 self._refresh_firm_startup_state(firm, spec, target_sales)
                 firm.price = self._initial_firm_price(spec, firm.last_unit_cost)
-                self._refresh_firm_startup_state(firm, spec, startup_expected_sales)
+                # Preserve the calibrated essential capacity instead of shrinking
+                # it back to a conservative expectation proxy.
+                self._refresh_firm_startup_state(firm, spec, target_sales)
+                if startup_expected_sales < target_sales:
+                    firm.last_expected_sales = startup_expected_sales
+                    firm.expected_sales_history = [startup_expected_sales]
 
         eligible_workers = len(
             [household for household in self._active_households() if self._household_labor_capacity(household) > 0.0]
@@ -7390,6 +7809,50 @@ class EconomySimulation:
                     firm_capacity = self._firm_effective_productivity(firm) * max(1.0, firm.desired_workers)
                     target_sales = sector_target * (firm_capacity / max(1e-9, sector_capacity))
                     self._refresh_firm_startup_state(firm, spec, target_sales)
+
+        # Final safeguard: startup essential sectors should not begin below the
+        # structural quantity the population needs to survive.
+        for sector_key in ESSENTIAL_SECTOR_KEYS:
+            spec = SECTOR_BY_KEY[sector_key]
+            sector_firms = sector_firms_by_key[sector_key]
+            if not sector_firms:
+                continue
+            structural_need = self._structural_sector_demand(sector_key)
+            sector_capacity = sum(
+                self._firm_effective_productivity(firm) * max(1.0, firm.desired_workers)
+                for firm in sector_firms
+            )
+            if sector_capacity >= structural_need or sector_capacity <= 0.0:
+                continue
+            capacity_boost = clamp(structural_need / sector_capacity, 1.0, 3.0)
+            for firm in sector_firms:
+                firm.productivity = clamp(firm.productivity * capacity_boost, 0.25, 25.0)
+                firm.technology = clamp(
+                    firm.technology * math.sqrt(capacity_boost),
+                    0.75,
+                    self.config.technology_cap,
+                )
+                firm.capital *= math.sqrt(capacity_boost)
+                target_sales = max(
+                    firm.last_sales,
+                    structural_need
+                    * (
+                        self._firm_effective_productivity(firm) * max(1.0, firm.desired_workers)
+                    )
+                    / max(
+                        1e-9,
+                        sum(
+                            self._firm_effective_productivity(candidate) * max(1.0, candidate.desired_workers)
+                            for candidate in sector_firms
+                        ),
+                    ),
+                )
+                self._refresh_firm_startup_state(firm, spec, target_sales)
+                effective_productivity = self._firm_effective_productivity(firm)
+                minimum_workers = self._workers_needed_for_units(target_sales, effective_productivity)
+                if firm.desired_workers < minimum_workers:
+                    firm.desired_workers = minimum_workers
+                    firm.last_worker_count = minimum_workers
 
     def _seed_initial_workforce(self) -> None:
         contract_periods = max(1, self.config.employment_contract_periods)
@@ -7451,10 +7914,13 @@ class EconomySimulation:
                 continue
 
             _, sector_key, firm, marginal_output = best_choice
-            firm.workers.append(household.id)
-            household.employed_by = firm.id
             # Stagger initial renewals so the whole labor market does not renegotiate at once.
-            household.employment_tenure = self.rng.randrange(contract_periods)
+            self._assign_household_to_employer(
+                household,
+                firm.id,
+                firm.wage_offer,
+                starting_tenure=self.rng.randrange(contract_periods),
+            )
             sector_output[sector_key] += marginal_output
 
         for sector_key in ESSENTIAL_SECTOR_KEYS:
@@ -7464,6 +7930,20 @@ class EconomySimulation:
                 self._refresh_firm_startup_state(firm, spec, startup_sales)
                 firm.price = self._initial_firm_price(spec, firm.last_unit_cost)
                 self._refresh_firm_startup_state(firm, spec, startup_sales)
+                if len(firm.workers) > firm.desired_workers:
+                    committed_workers = len(firm.workers)
+                    firm.desired_workers = committed_workers
+                    firm.last_worker_count = committed_workers
+                    firm.last_wage_bill = committed_workers * firm.wage_offer
+                    firm.last_total_cost = (
+                        firm.last_wage_bill
+                        + firm.last_wage_bill * self._government_payroll_tax_rate()
+                        + firm.last_input_cost
+                        + firm.last_transport_cost
+                        + firm.last_fixed_overhead
+                        + firm.last_capital_charge
+                    )
+                    firm.last_unit_cost = firm.last_total_cost / max(1.0, startup_sales)
 
     def _create_startup_firm(
         self,
@@ -7976,16 +8456,12 @@ class EconomySimulation:
                     firm.last_expected_sales = max(best_expected_sales, firm.last_expected_sales)
                     firm.last_unit_cost = variable_unit_cost + fixed_cost / max(1.0, firm.last_expected_sales)
                     continue
-                if self._is_education_sector(spec.key):
-                    desired_service_units = target_inventory
-                    firm.desired_workers = self._workers_needed_for_units(
-                        desired_service_units,
-                        effective_productivity,
-                        productivity_floor=0.25,
-                    )
-                else:
-                    desired_output = self._firm_desired_output_from_expected_sales(firm, best_expected_sales)
-                    firm.desired_workers = self._workers_needed_for_units(desired_output, effective_productivity)
+                firm.desired_workers = self._target_headcount_for_expected_sales(
+                    firm,
+                    best_expected_sales,
+                    effective_productivity,
+                    target_inventory=target_inventory,
+                )
                 firm.target_inventory = target_inventory
                 firm.price = chosen_price
                 firm.last_expected_sales = best_expected_sales
@@ -8001,9 +8477,34 @@ class EconomySimulation:
             ),
             reverse=True,
         )
-        eligible_households = self._eligible_households()
+        unemployed_candidates = self._eligible_households()
+        contract_periods = max(1, self.config.employment_contract_periods)
+        negotiable_workers = [
+            household
+            for household in self._active_households()
+            if household.employed_by not in (None, PUBLIC_ADMINISTRATION_EMPLOYER_ID)
+            and self._household_labor_capacity(household) > 0.0
+            and self._household_notice_window_open(household)
+        ]
+        eligible_households = unemployed_candidates + negotiable_workers
+        reserved_future_hires_by_firm: dict[int, int] = {}
+        for household in self._active_households():
+            pending_employer_id = household.pending_employer_id
+            if pending_employer_id in (None, PUBLIC_ADMINISTRATION_EMPLOYER_ID):
+                continue
+            pending_firm = self.firm_by_id.get(pending_employer_id)
+            if pending_firm is None or not pending_firm.active:
+                continue
+            reserved_future_hires_by_firm[pending_employer_id] = (
+                reserved_future_hires_by_firm.get(pending_employer_id, 0) + 1
+            )
+        essential_protection_active = self._in_essential_protection()
 
         for household in eligible_households:
+            existing_pending_offer = self._household_pending_offer(
+                household,
+                reserved_future_hires_by_firm=reserved_future_hires_by_firm,
+            )
             best_firm = None
             best_score = None
             best_rejected_firm = None
@@ -8019,19 +8520,26 @@ class EconomySimulation:
             else:
                 age_bonus = -self.config.senior_worker_penalty
 
-            if self._in_essential_protection():
+            if essential_protection_active:
                 essential_candidates_exist = any(
                     firm.active
                     and firm.sector in ESSENTIAL_SECTOR_KEYS
-                    and len(firm.workers) < firm.desired_workers
+                    and (
+                        len(firm.workers) + reserved_future_hires_by_firm.get(firm.id, 0)
+                    ) < firm.desired_workers
                     and firm.wage_offer >= household.reservation_wage
                     for firm in firm_order
                 )
 
             for firm in firm_order:
-                if len(firm.workers) >= firm.desired_workers:
+                reserved_future_hires = reserved_future_hires_by_firm.get(firm.id, 0)
+                if len(firm.workers) + reserved_future_hires >= firm.desired_workers:
                     continue
-                if self._in_essential_protection() and essential_candidates_exist and firm.sector not in ESSENTIAL_SECTOR_KEYS:
+                if essential_protection_active and essential_candidates_exist and firm.sector not in ESSENTIAL_SECTOR_KEYS:
+                    continue
+                if household.employed_by == firm.id:
+                    continue
+                if existing_pending_offer is not None and firm.wage_offer <= existing_pending_offer[1]:
                     continue
                 stability = firm.cash / max(1.0, firm.last_wage_bill + firm.price)
                 labor_capacity = self._worker_effective_labor_for_sector(household, firm.sector)
@@ -8051,6 +8559,19 @@ class EconomySimulation:
                     * labor_capacity
                     + age_bonus
                 )
+                if household.employed_by is not None:
+                    current_employer = self.firm_by_id.get(household.employed_by)
+                    current_wage = self._household_current_contract_wage(
+                        household,
+                        current_employer.wage_offer if current_employer is not None else firm.wage_offer,
+                    )
+                    if firm.wage_offer <= current_wage:
+                        continue
+                    score += 0.25 * clamp(
+                        (firm.wage_offer - current_wage) / max(1.0, current_wage),
+                        0.0,
+                        0.6,
+                    )
                 if firm.wage_offer < household.reservation_wage:
                     if best_rejected_score is None or score > best_rejected_score:
                         best_rejected_score = score
@@ -8060,9 +8581,35 @@ class EconomySimulation:
                     best_score = score
                     best_firm = firm
             if best_firm is not None:
-                best_firm.workers.append(household.id)
-                household.employed_by = best_firm.id
-                household.employment_tenure = 0
+                if household.employed_by is None:
+                    self._assign_household_to_employer(household, best_firm.id, best_firm.wage_offer)
+                else:
+                    current_employer = self.firm_by_id.get(household.employed_by)
+                    current_wage = self._household_current_contract_wage(
+                        household,
+                        current_employer.wage_offer if current_employer is not None else 0.0,
+                    )
+                    switch_probability = self._household_job_switch_probability(
+                        household,
+                        current_wage=current_wage,
+                        offered_wage=best_firm.wage_offer,
+                        unemployment_rate=self.history[-1].unemployment_rate if self.history else 0.12,
+                        has_concrete_offer=True,
+                    )
+                    if self.rng.random() < switch_probability:
+                        old_pending_employer_id = household.pending_employer_id
+                        if old_pending_employer_id not in (None, PUBLIC_ADMINISTRATION_EMPLOYER_ID):
+                            reserved_future_hires_by_firm[old_pending_employer_id] = max(
+                                0,
+                                reserved_future_hires_by_firm.get(old_pending_employer_id, 0) - 1,
+                            )
+                        household.pending_employer_id = best_firm.id
+                        household.pending_contract_wage = best_firm.wage_offer
+                        reserved_future_hires_by_firm[best_firm.id] = (
+                            reserved_future_hires_by_firm.get(best_firm.id, 0) + 1
+                        )
+                    elif existing_pending_offer is None:
+                        self._clear_household_pending_offer(household)
             elif best_rejected_firm is not None:
                 self._record_labor_offer_rejection(best_rejected_firm, household.reservation_wage)
 
@@ -8089,7 +8636,11 @@ class EconomySimulation:
             if firm.sector in ESSENTIAL_SECTOR_KEYS:
                 self._period_essential_production_units += output_units
 
-            wage_bill = firm.wage_offer * len(workers)
+            worker_contract_wages = {
+                worker_id: self._household_current_contract_wage(self.households[worker_id], firm.wage_offer)
+                for worker_id in workers
+            }
+            wage_bill = sum(worker_contract_wages.values())
             firm.last_wage_bill = wage_bill
             firm.cash -= wage_bill
             self._period_wages += wage_bill
@@ -8127,11 +8678,12 @@ class EconomySimulation:
 
             for worker_id in workers:
                 household = self.households[worker_id]
+                gross_wage = worker_contract_wages[worker_id]
                 labor_tax = min(
-                    firm.wage_offer,
-                    firm.wage_offer * self._government_labor_tax_rate(firm.wage_offer),
+                    gross_wage,
+                    gross_wage * self._government_labor_tax_rate(gross_wage),
                 )
-                net_wage = firm.wage_offer - labor_tax
+                net_wage = gross_wage - labor_tax
                 household.wage_income += net_wage
                 household.last_income += net_wage
                 if labor_tax > 0.0:
@@ -8426,6 +8978,12 @@ class EconomySimulation:
             family_members = [member for member in members if member.alive]
             if not family_members:
                 continue
+            family_anchor = family_members[0]
+            family_id = (
+                self._family_root_for_child(family_anchor)
+                if self._household_age_years(family_anchor) < self.config.entry_age_years
+                else self._family_root_for_adult(family_anchor)
+            )
 
             family_row_indices: list[int] = []
             member_target_units_by_sector: dict[int, dict[str, float]] = {}
@@ -8449,6 +9007,7 @@ class EconomySimulation:
             spending_log = {spec.key: 0.0 for spec in SECTOR_SPECS}
             purchased_units_by_sector = {spec.key: 0.0 for spec in SECTOR_SPECS}
             self._period_worker_cash_available += family_cash
+            self._period_family_cash_available[family_id] = family_cash
 
             for member in family_members:
                 if adult_count > 0:
@@ -8770,6 +9329,10 @@ class EconomySimulation:
             self._period_worker_cash_saved += family_remaining_cash
             self._period_worker_voluntary_saved += voluntary_saved_cash
             self._period_worker_involuntary_retained += involuntary_retained_cash
+            self._period_family_cash_saved[family_id] = family_remaining_cash
+            self._period_family_cash_spent[family_id] = max(0.0, family_cash - family_remaining_cash)
+            self._period_family_voluntary_saved_cash[family_id] = voluntary_saved_cash
+            self._period_family_involuntary_retained_cash[family_id] = involuntary_retained_cash
             per_adult_savings = family_remaining_cash / max(1, adult_count)
             allocated_units_by_member = self._allocate_family_consumption_units(
                 family_members,
@@ -9513,6 +10076,11 @@ class EconomySimulation:
             * 0.20
             * revealed_entry_pressure
         )
+        if spec.key in ESSENTIAL_SECTOR_KEYS:
+            package_multiplier = max(
+                package_multiplier,
+                0.30 + 0.20 * revealed_entry_pressure,
+            )
         effective_scale = scale * package_multiplier
         effective_demand = target_demand * effective_scale
         base_cash_budget, base_capital_budget, base_inventory_budget = self._entry_package_budgets(
@@ -10395,6 +10963,9 @@ class EconomySimulation:
         snapshots: list[FirmPeriodSnapshot] = []
         for firm in self.firms:
             operated_this_period = firm.age > 0
+            exited_workers = self._period_firm_exited_worker_ids.get(firm.id, set())
+            quit_workers = self._period_firm_quit_worker_ids.get(firm.id, set())
+            dismissed_workers = self._period_firm_dismissed_worker_ids.get(firm.id, set())
             snapshots.append(
                 FirmPeriodSnapshot(
                     period=self.period,
@@ -10403,9 +10974,18 @@ class EconomySimulation:
                     firm_id=firm.id,
                     sector=firm.sector,
                     active=firm.active,
+                    starting_workers=self._period_firm_starting_workers.get(firm.id, len(firm.workers)),
                     workers=len(firm.workers),
                     desired_workers=firm.desired_workers,
                     vacancies=max(0, firm.desired_workers - len(firm.workers)),
+                    worker_exits=len(exited_workers),
+                    worker_quits=len(quit_workers),
+                    worker_dismissals=len(dismissed_workers),
+                    exited_workers_reemployed=sum(
+                        1
+                        for worker_id in exited_workers
+                        if self.households[worker_id].alive and self.households[worker_id].employed_by is not None
+                    ),
                     price=firm.price,
                     wage_offer=firm.wage_offer,
                     cash=firm.cash,
@@ -10435,6 +11015,7 @@ class EconomySimulation:
                     revenue=firm.last_revenue if operated_this_period else 0.0,
                     production=firm.last_production if operated_this_period else 0.0,
                     profit=firm.last_profit if operated_this_period else 0.0,
+                    payroll_total=firm.last_wage_bill if operated_this_period else 0.0,
                     total_cost=firm.last_total_cost if operated_this_period else 0.0,
                     loss_streak=firm.loss_streak,
                     market_share=firm.last_market_share if operated_this_period else 0.0,
@@ -10442,6 +11023,98 @@ class EconomySimulation:
                     forecast_error_belief=firm.forecast_error_belief,
                     target_inventory=firm.target_inventory,
                     age=firm.age,
+                )
+            )
+        return snapshots
+
+    def _build_family_period_snapshots(self) -> list[FamilyPeriodSnapshot]:
+        self._refresh_period_household_caches()
+        self._refresh_period_family_cache()
+
+        groups = self._family_groups()
+        if not groups:
+            return []
+
+        periods_per_year = max(1, self.config.periods_per_year)
+        year = ((self.period - 1) // periods_per_year) + 1
+        period_in_year = ((self.period - 1) % periods_per_year) + 1
+        necessary_essential_demand_units = max(0.0, self._period_essential_demand_units)
+        essential_offer_units = max(0.0, self._period_essential_production_units)
+        necessary_demand_to_offer_ratio = (
+            necessary_essential_demand_units / max(1.0, essential_offer_units)
+            if essential_offer_units > 0.0
+            else (1.0 if necessary_essential_demand_units > 0.0 else 0.0)
+        )
+        sector_prices = {
+            spec.key: self._average_sector_price(spec.key)
+            for spec in SECTOR_SPECS
+        }
+        snapshots: list[FamilyPeriodSnapshot] = []
+        for family_id, members in groups.items():
+            alive_members = [member for member in members if member.alive]
+            if not alive_members:
+                continue
+
+            adults = [
+                member
+                for member in alive_members
+                if self._household_age_years(member) >= self.config.entry_age_years
+            ]
+            labor_capable_members = [
+                member for member in alive_members if self._household_labor_capacity(member) > 0.0
+            ]
+            employed_members = sum(1 for member in labor_capable_members if member.employed_by is not None)
+
+            essential_basket_cost = sum(self._essential_budget(member) for member in alive_members)
+            private_school_basket_cost = 0.0
+            for member in alive_members:
+                school_target_units = self._household_sector_desired_units(member, "school")
+                public_school_units = (
+                    self._public_education_target_units(member, "school", school_target_units)
+                    if self.config.government_enabled
+                    else 0.0
+                )
+                private_school_units = max(0.0, school_target_units - public_school_units)
+                private_school_basket_cost += private_school_units * sector_prices["school"]
+
+            family_income_total = sum(max(0.0, member.last_income) for member in alive_members)
+            family_cash_available = max(0.0, self._period_family_cash_available.get(family_id, 0.0))
+            family_saved_cash = max(0.0, self._period_family_cash_saved.get(family_id, 0.0))
+            family_spent_cash = max(0.0, self._period_family_cash_spent.get(family_id, 0.0))
+            family_voluntary_saved_cash = max(0.0, self._period_family_voluntary_saved_cash.get(family_id, 0.0))
+            family_involuntary_retained_cash = max(
+                0.0,
+                self._period_family_involuntary_retained_cash.get(family_id, 0.0),
+            )
+            if family_cash_available > 0.0:
+                propensity_to_save = min(1.0, max(0.0, family_saved_cash / family_cash_available))
+                propensity_to_spend = min(1.0, max(0.0, family_spent_cash / family_cash_available))
+            else:
+                propensity_to_save = 0.0
+                propensity_to_spend = 0.0
+            snapshots.append(
+                FamilyPeriodSnapshot(
+                    period=self.period,
+                    year=year,
+                    period_in_year=period_in_year,
+                    family_id=family_id,
+                    family_members=len(alive_members),
+                    adult_members=len(adults),
+                    labor_capable_members=len(labor_capable_members),
+                    employed_members=employed_members,
+                    total_basic_basket_cost_including_school=essential_basket_cost + private_school_basket_cost,
+                    private_school_basket_cost=private_school_basket_cost,
+                    total_family_income=family_income_total,
+                    family_employment_rate=employed_members / max(1, len(labor_capable_members)),
+                    family_cash_available=family_cash_available,
+                    family_cash_spent=family_spent_cash,
+                    family_voluntary_saved_cash=family_voluntary_saved_cash,
+                    family_involuntary_retained_cash=family_involuntary_retained_cash,
+                    marginal_propensity_to_spend=propensity_to_spend,
+                    marginal_propensity_to_save=propensity_to_save,
+                    necessary_essential_demand_units=necessary_essential_demand_units,
+                    essential_offer_units=essential_offer_units,
+                    necessary_demand_to_offer_ratio=necessary_demand_to_offer_ratio,
                 )
             )
         return snapshots

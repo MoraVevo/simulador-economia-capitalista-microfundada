@@ -148,6 +148,9 @@ class Household:
     loan_restructure_grace_periods: int = 0
     credit_exclusion_periods: int = 0
     employed_by: Optional[int] = None
+    contract_wage: float = 0.0
+    pending_employer_id: Optional[int] = None
+    pending_contract_wage: float = 0.0
     guardian_id: Optional[int] = None
     partner_id: Optional[int] = None
     partnership_start_period: int = -999
@@ -159,6 +162,8 @@ class Household:
     last_birth_period: int = -999
     dependent_children: int = 0
     employment_tenure: int = 0
+    job_change_aversion: float = 0.0
+    employment_insecurity_memory: float = 0.0
     wage_income: float = 0.0
     last_income: float = 0.0
     previous_income: float = 0.0
@@ -335,9 +340,14 @@ class FirmPeriodSnapshot:
     firm_id: int
     sector: str
     active: bool
+    starting_workers: int
     workers: int
     desired_workers: int
     vacancies: int
+    worker_exits: int
+    worker_quits: int
+    worker_dismissals: int
+    exited_workers_reemployed: int
     price: float
     wage_offer: float
     cash: float
@@ -367,6 +377,7 @@ class FirmPeriodSnapshot:
     revenue: float
     production: float
     profit: float
+    payroll_total: float
     total_cost: float
     loss_streak: int
     market_share: float
@@ -377,12 +388,37 @@ class FirmPeriodSnapshot:
 
 
 @dataclass(frozen=True)
+class FamilyPeriodSnapshot:
+    period: int
+    year: int
+    period_in_year: int
+    family_id: int
+    family_members: int
+    adult_members: int
+    labor_capable_members: int
+    employed_members: int
+    total_basic_basket_cost_including_school: float
+    private_school_basket_cost: float
+    total_family_income: float
+    family_employment_rate: float
+    family_cash_available: float
+    family_cash_spent: float
+    family_voluntary_saved_cash: float
+    family_involuntary_retained_cash: float
+    marginal_propensity_to_spend: float
+    marginal_propensity_to_save: float
+    necessary_essential_demand_units: float
+    essential_offer_units: float
+    necessary_demand_to_offer_ratio: float
+
+
+@dataclass(frozen=True)
 class SimulationConfig:
     periods: int = 120
-    households: int = 10000
+    households: int = 5000
     seed: int = 7
     periods_per_year: int = 12
-    firms_per_sector: int = 40
+    firms_per_sector: int = 20
     commercial_banks: int = 3
     target_unemployment: float = 0.08
     capital_scale: float = 350.0
@@ -418,6 +454,7 @@ class SimulationConfig:
     firm_restart_min_scale: float = 0.01
     firm_restart_max_scale: float = 3.0
     employment_contract_periods: int = 12
+    contract_notice_periods: int = 2
     essential_protection_periods: int = 24
     startup_essential_supply_buffer: float = 1.35
     startup_clothing_supply_multiplier: float = 2.0
@@ -460,6 +497,8 @@ class SimulationConfig:
     initial_university_completion_share: float = 0.25
     startup_grace_periods: int = 2
     firm_learning_warmup_periods: int = 18
+    price_adjustment_inertia: float = 0.78
+    price_adjustment_min_history: int = 4
     inventory_shelf_life_months: int = 6
     birth_interval_periods: int = 9
     partnership_affinity_buckets: int = 20
@@ -629,6 +668,7 @@ class SimulationConfig:
     initial_private_school_firms: int = 10
     initial_private_university_firms: int = 1
     track_firm_history: bool = False
+    track_family_history: bool = False
 
 
 @dataclass
@@ -866,3 +906,4 @@ class SimulationResult:
     central_bank: CentralBank
     banks: list[CommercialBank]
     government: Government
+    family_history: list[FamilyPeriodSnapshot] = field(default_factory=list)

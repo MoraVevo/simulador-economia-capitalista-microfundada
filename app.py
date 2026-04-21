@@ -15,7 +15,7 @@ import streamlit as st
 from economy_simulator import EconomySimulation, ESSENTIAL_SECTOR_KEYS, SECTOR_BY_KEY, SECTOR_SPECS, SimulationConfig
 from economy_simulator.domain import SimulationResult
 from economy_simulator.policies import default_policy_values, scenario_policy_presets
-from economy_simulator.reporting import core_history_frame, firm_history_frame, firm_period_summary, history_frame
+from economy_simulator.reporting import core_history_frame, firm_audit_frame, firm_history_frame, firm_period_summary, history_frame
 
 INITIAL_HOUSEHOLDS = 10000
 MONTH_PRESETS = [12, 24, 60, 120, 240]
@@ -1460,6 +1460,7 @@ def build_firm_diagnostic_data(
         "period",
         "population",
         "unemployment_rate",
+        "average_wage",
         "average_family_basic_basket_cost",
         "average_family_income",
         "family_income_to_basket_ratio",
@@ -1513,6 +1514,59 @@ def build_firm_diagnostic_data(
     firm_data["active_next"] = active_next.where(active_next.notna(), firm_data["active"]).astype(bool)
     firm_data["decision_note"] = firm_data.apply(describe_firm_month, axis=1)
     return firm_data
+
+
+def build_firm_audit_pipeline_view(firm_audit_df: pd.DataFrame) -> pd.DataFrame:
+    if firm_audit_df.empty:
+        return firm_audit_df.copy()
+
+    audit_view = firm_audit_df.copy()
+    audit_view["sector_label"] = audit_view["sector"].map(
+        lambda sector_key: SECTOR_LABELS.get(
+            SECTOR_BY_KEY[sector_key].name,
+            SECTOR_BY_KEY[sector_key].name,
+        )
+        if sector_key in SECTOR_BY_KEY
+        else sector_key
+    )
+    audit_view = audit_view.rename(
+        columns={
+            "period": "Mes",
+            "firm_id": "Firma",
+            "sector_label": "Sector",
+            "starting_workers": "Trabajadores al inicio",
+            "expected_sales": "Ventas esperadas",
+            "sales": "Ventas reales",
+            "inventory": "Inventario al cierre",
+            "price": "Precio de venta",
+            "total_cost": "Costo total del periodo",
+            "firm_income_total": "Ingresos totales del periodo",
+            "desired_workers_next_period": "Trabajadores deseados proximo periodo",
+            "worker_exits": "Trabajadores que salieron",
+            "exited_workers_reemployed": "Salidas que encontraron trabajo",
+            "average_wage": "Salario promedio efectivo",
+            "unemployment_rate": "Desempleo total",
+        }
+    )
+    return audit_view[
+        [
+            "Mes",
+            "Firma",
+            "Sector",
+            "Trabajadores al inicio",
+            "Ventas esperadas",
+            "Ventas reales",
+            "Inventario al cierre",
+            "Precio de venta",
+            "Costo total del periodo",
+            "Ingresos totales del periodo",
+            "Trabajadores deseados proximo periodo",
+            "Trabajadores que salieron",
+            "Salidas que encontraron trabajo",
+            "Salario promedio efectivo",
+            "Desempleo total",
+        ]
+    ].sort_values(["Sector", "Firma"]).reset_index(drop=True)
 
 
 st.title("Simulador economico")
@@ -3402,6 +3456,30 @@ with tab_firms:
     else:
         firm_detail_view = firm_detail_view.sort_values(["Participacion de mercado", "Costo unitario"], ascending=[False, True])
     chart_view = firm_detail_view.sort_values("Participacion de mercado", ascending=False).head(15).copy()
+    firm_audit_view = build_firm_audit_pipeline_view(firm_audit_frame(firm_period_view_df, history_view_df))
+    if selected_sector != "Todos los sectores" and not firm_audit_view.empty:
+        firm_audit_view = firm_audit_view[firm_audit_view["Sector"] == selected_sector].copy()
+
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.subheader("Pipeline de auditoria de firmas")
+    st.caption(
+        "Resume el mes seleccionado firma por firma con dotacion inicial, ventas esperadas y realizadas, "
+        "inventario, precio, costos, ingresos, salidas laborales y contexto agregado del mercado de trabajo."
+    )
+    if firm_audit_view.empty:
+        st.info("No hay datos de auditoria para el filtro actual.")
+    else:
+        st.dataframe(firm_audit_view, width="stretch", hide_index=True)
+        st.download_button(
+            "Descargar CSV del pipeline de auditoria",
+            dataframe_to_csv_bytes(firm_audit_view),
+            file_name=f"firm_audit_period_{selected_period}.csv",
+            mime="text/csv",
+            width="stretch",
+            key=f"download_firm_audit_{selected_period}_{selected_sector}",
+            on_click="ignore",
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.dataframe(
         firm_detail_view[
@@ -3865,8 +3943,11 @@ with tab_firms:
                     "price_change",
                     "wage_offer",
                     "wage_change",
+                    "starting_workers",
                     "workers",
                     "desired_workers",
+                    "worker_exits",
+                    "exited_workers_reemployed",
                     "expected_sales",
                     "expected_sales_change",
                     "sales",
@@ -3884,6 +3965,7 @@ with tab_firms:
                     "learning_maturity",
                     "training_phase",
                     "population",
+                    "average_wage",
                     "unemployment_rate",
                     "family_income_to_basket_ratio",
                     "families_income_below_basket_share",
@@ -3911,8 +3993,11 @@ with tab_firms:
                     "price_change": "Cambio de precio",
                     "wage_offer": "Salario ofrecido",
                     "wage_change": "Cambio de salario",
+                    "starting_workers": "Trabajadores al inicio",
                     "workers": "Trabajadores",
                     "desired_workers": "Trabajadores deseados",
+                    "worker_exits": "Trabajadores que salieron",
+                    "exited_workers_reemployed": "Salidas que encontraron trabajo",
                     "expected_sales": "Ventas esperadas",
                     "expected_sales_change": "Cambio de ventas esperadas",
                     "sales": "Ventas reales",
@@ -3930,6 +4015,7 @@ with tab_firms:
                     "learning_maturity": "Madurez de aprendizaje",
                     "training_phase": "Fase de aprendizaje",
                     "population": "Poblacion",
+                    "average_wage": "Salario promedio efectivo",
                     "unemployment_rate": "Desempleo",
                     "family_income_to_basket_ratio": "Ingreso/canasta hogares",
                     "families_income_below_basket_share": "Familias bajo canasta",

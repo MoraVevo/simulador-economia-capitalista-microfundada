@@ -12,7 +12,7 @@ from .engine import EconomySimulation
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the economy simulator.")
     parser.add_argument("--periods", type=int, default=120, help="Number of periods to simulate.")
-    parser.add_argument("--households", type=int, default=10000, help="Number of worker households.")
+    parser.add_argument("--households", type=int, default=5000, help="Number of worker households.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed.")
     parser.add_argument(
         "--periods-per-year",
@@ -23,7 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--firms-per-sector",
         type=int,
-        default=40,
+        default=20,
         help="Number of firms to create in each sector at startup.",
     )
     parser.add_argument("--output", type=Path, help="Write the period history to JSON.")

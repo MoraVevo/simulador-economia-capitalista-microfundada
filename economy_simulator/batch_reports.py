@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import json
 import math
 import os
 import tempfile
+import traceback
 from io import StringIO
 from pathlib import Path
 
@@ -21,27 +23,39 @@ from reportlab.lib.units import cm
 from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .policies import CountryProfile, country_profiles
-from .scenario_runner import run_scenario_history
+from .scenario_runner import run_scenario_export_bundle
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run country-style scenarios in parallel and export one PDF per profile.")
+    parser = argparse.ArgumentParser(description="Run country-style scenarios in parallel and export one XLSX per profile.")
     parser.add_argument("--periods", type=int, default=240, help="Simulation periods to run per profile.")
-    parser.add_argument("--households", type=int, default=10000, help="Worker households per scenario.")
-    parser.add_argument("--firms-per-sector", type=int, default=40, help="Initial firms per sector.")
+    parser.add_argument("--households", type=int, default=5000, help="Worker households per scenario.")
+    parser.add_argument("--firms-per-sector", type=int, default=20, help="Initial firms per sector.")
     parser.add_argument("--seed", type=int, default=7, help="Random seed for all profiles.")
     parser.add_argument("--periods-per-year", type=int, default=12, help="Simulation periods in one year.")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("output/pdf"),
-        help="Directory where the country PDFs and CSV summaries will be written.",
+        default=Path("."),
+        help="Directory where the country XLSX files will be written.",
     )
     parser.add_argument(
         "--workers",
         type=int,
         default=0,
         help="Parallel worker processes. Use 0 to auto-pick up to the number of profiles.",
+    )
+    parser.add_argument(
+        "--audit-firms-sample",
+        type=int,
+        default=20,
+        help="Random number of firms to include in each country audit workbook.",
+    )
+    parser.add_argument(
+        "--audit-families-sample",
+        type=int,
+        default=45,
+        help="Random number of families to include in each country audit workbook.",
     )
     parser.add_argument(
         "--log-every",
@@ -54,6 +68,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="If > 0 and < periods, also export phase PDFs split at this period.",
+    )
+    parser.add_argument(
+        "--include-csv",
+        action="store_true",
+        help="Also export monthly and annual CSV files per country.",
+    )
+    parser.add_argument(
+        "--include-pdf",
+        action="store_true",
+        help="Also export the existing PDF reports per country.",
     )
     return parser
 
@@ -103,9 +127,39 @@ def _phase_label(start_period: int, end_period: int, phase_index: int) -> str:
     return f"Fase {phase_index} ({start_period}-{end_period})"
 
 
+def _numeric_series(values: pd.Series | list[float] | list[int] | list[object]) -> pd.Series:
+    return pd.to_numeric(pd.Series(values), errors="coerce")
+
+
+def _plot_numeric_line(
+    ax,
+    x_values: pd.Series | list[float] | list[int] | list[object],
+    y_values: pd.Series | list[float] | list[int] | list[object],
+    *,
+    label: str,
+    linewidth: float = 1.8,
+    linestyle: str = "-",
+    color: str | None = None,
+) -> bool:
+    x_series = _numeric_series(x_values)
+    y_series = _numeric_series(y_values)
+    valid = ~(x_series.isna() | y_series.isna())
+    if not valid.any():
+        return False
+    plot_kwargs = {
+        "label": label,
+        "linewidth": linewidth,
+        "linestyle": linestyle,
+    }
+    if color is not None:
+        plot_kwargs["color"] = color
+    ax.plot(x_series[valid], y_series[valid], **plot_kwargs)
+    return True
+
+
 def _run_profile(payload: dict[str, object]) -> tuple[str, str]:
     name = str(payload["scenario_name"])
-    frame_json = run_scenario_history(
+    bundle_json = run_scenario_export_bundle(
         months=int(payload["months"]),
         seed=int(payload["seed"]),
         firms_per_sector=int(payload["firms_per_sector"]),
@@ -116,8 +170,175 @@ def _run_profile(payload: dict[str, object]) -> tuple[str, str]:
         shock_policy_values=None,
         scenario_name=name,
         log_every=int(payload["log_every"]),
+        audit_firm_sample_size=int(payload["audit_firms_sample"]),
+        audit_family_sample_size=int(payload["audit_families_sample"]),
     )
-    return name, frame_json
+    return name, bundle_json
+
+
+def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    sector_labels = {
+        "food": "Alimentos basicos",
+        "housing": "Vivienda y servicios esenciales",
+        "clothing": "Ropa e higiene",
+        "manufactured": "Manufactura / bienes industriales",
+        "leisure": "Ocio / entretenimiento / tecnologia simple",
+        "school": "Escuela / educacion basica",
+        "university": "Universidad / educacion avanzada",
+        "public_administration": "Administracion publica / servicios estatales",
+    }
+    renamed = frame.copy()
+    renamed["sector"] = renamed["sector"].map(lambda value: sector_labels.get(value, value))
+    renamed = renamed.rename(
+        columns={
+            "period": "Periodo",
+            "year": "Anio",
+            "period_in_year": "Periodo en anio",
+            "firm_id": "Firma",
+            "sector": "Sector",
+            "starting_workers": "Trabajadores inicio",
+            "expected_sales": "Ventas esperadas",
+            "sales": "Ventas reales",
+            "inventory": "Inventario",
+            "price": "Precio venta",
+            "payroll_total": "Nomina total periodo",
+            "total_cost": "Costo total periodo",
+            "firm_income_total": "Ingresos totales periodo",
+            "firm_profit_total": "Ganancias totales periodo",
+            "desired_workers_next_period": "Trabajadores deseados proximo periodo",
+            "worker_exits": "Trabajadores salieron",
+            "worker_quits": "Trabajadores renunciaron",
+            "worker_dismissals": "Trabajadores despedidos",
+            "exited_workers_reemployed": "Salieron y encontraron trabajo",
+            "average_wage": "Salario promedio efectivo",
+            "unemployment_rate": "Tasa desempleo total",
+        }
+    )
+    ordered_columns = [
+        "Periodo",
+        "Anio",
+        "Periodo en anio",
+        "Firma",
+        "Sector",
+        "Trabajadores inicio",
+        "Ventas esperadas",
+        "Ventas reales",
+        "Inventario",
+        "Precio venta",
+        "Nomina total periodo",
+        "Costo total periodo",
+        "Ingresos totales periodo",
+        "Ganancias totales periodo",
+        "Trabajadores deseados proximo periodo",
+        "Trabajadores salieron",
+        "Trabajadores renunciaron",
+        "Trabajadores despedidos",
+        "Salieron y encontraron trabajo",
+        "Salario promedio efectivo",
+        "Tasa desempleo total",
+    ]
+    return renamed[ordered_columns].copy()
+
+
+def _rename_family_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    renamed = frame.rename(
+        columns={
+            "period": "Periodo",
+            "year": "Anio",
+            "period_in_year": "Periodo en anio",
+            "family_id": "Familia",
+            "family_members": "Integrantes familia",
+            "adult_members": "Adultos familia",
+            "labor_capable_members": "Miembros laboralmente activos",
+            "employed_members": "Miembros empleados",
+            "total_basic_basket_cost_including_school": "Costo total canasta basica con escuela",
+            "private_school_basket_cost": "Costo escuela pagado por hogar",
+            "total_family_income": "Ingresos totales familia",
+            "family_employment_rate": "Tasa empleo familia",
+            "family_cash_available": "Efectivo disponible familia periodo",
+            "family_cash_spent": "Gasto efectivo familia periodo",
+            "family_voluntary_saved_cash": "Ahorro voluntario familia periodo",
+            "family_involuntary_retained_cash": "Retencion involuntaria familia periodo",
+            "marginal_propensity_to_spend": "Propension marginal gastar",
+            "marginal_propensity_to_save": "Propension marginal ahorrar",
+            "necessary_essential_demand_units": "Demanda necesaria esencial periodo",
+            "essential_offer_units": "Oferta esencial periodo",
+            "necessary_demand_to_offer_ratio": "Demanda necesaria sobre oferta",
+        }
+    )
+    ordered_columns = [
+        "Periodo",
+        "Anio",
+        "Periodo en anio",
+        "Familia",
+        "Integrantes familia",
+        "Adultos familia",
+        "Miembros laboralmente activos",
+        "Miembros empleados",
+        "Costo total canasta basica con escuela",
+        "Costo escuela pagado por hogar",
+        "Ingresos totales familia",
+        "Tasa empleo familia",
+        "Efectivo disponible familia periodo",
+        "Gasto efectivo familia periodo",
+        "Ahorro voluntario familia periodo",
+        "Retencion involuntaria familia periodo",
+        "Propension marginal gastar",
+        "Propension marginal ahorrar",
+        "Demanda necesaria esencial periodo",
+        "Oferta esencial periodo",
+        "Demanda necesaria sobre oferta",
+    ]
+    return renamed[ordered_columns].copy()
+
+
+def _scenario_sample_seed(base_seed: int, scenario_name: str, salt: str) -> int:
+    scenario_offset = sum((index + 1) * ord(char) for index, char in enumerate(f"{scenario_name}:{salt}"))
+    return int(base_seed) * 10_003 + scenario_offset
+
+
+def _sample_audit_entities(
+    frame: pd.DataFrame,
+    *,
+    id_column: str,
+    sample_size: int,
+    random_state: int,
+) -> pd.DataFrame:
+    if frame.empty or sample_size <= 0 or id_column not in frame.columns:
+        return frame.iloc[0:0].copy()
+
+    unique_ids = pd.Series(frame[id_column].dropna().unique())
+    if unique_ids.empty:
+        return frame.iloc[0:0].copy()
+
+    target_size = min(int(sample_size), len(unique_ids))
+    if target_size >= len(unique_ids):
+        sampled_ids = set(unique_ids.tolist())
+    else:
+        sampled_ids = set(unique_ids.sample(n=target_size, random_state=random_state).tolist())
+    sampled = frame[frame[id_column].isin(sampled_ids)].copy()
+    sort_columns = [column for column in ("period", "year", "period_in_year", id_column) if column in sampled.columns]
+    if sort_columns:
+        sampled = sampled.sort_values(sort_columns)
+    return sampled.reset_index(drop=True)
+
+
+def _write_country_xlsx(
+    output_path: Path,
+    monthly: pd.DataFrame,
+    annual: pd.DataFrame,
+    firm_audit: pd.DataFrame,
+    family_audit: pd.DataFrame,
+) -> None:
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        monthly.to_excel(writer, sheet_name="macro_mensual", index=False)
+        annual.to_excel(writer, sheet_name="macro_anual", index=False)
+        _rename_firm_audit_export(firm_audit).to_excel(writer, sheet_name="auditoria_firmas", index=False)
+        _rename_family_audit_export(family_audit).to_excel(writer, sheet_name="auditoria_familias", index=False)
 
 
 def _annualize_core_history(monthly: pd.DataFrame) -> pd.DataFrame:
@@ -205,12 +426,32 @@ def _annualize_core_history(monthly: pd.DataFrame) -> pd.DataFrame:
     annual = monthly.groupby("year", as_index=False).agg(available)
     if annual.empty:
         return annual
+    for column in annual.columns:
+        if column != "year":
+            annual[column] = pd.to_numeric(annual[column], errors="coerce")
     if {"gdp_nominal", "real_gdp_nominal"}.issubset(annual.columns):
         annual["gdp_deflator"] = annual["gdp_nominal"] / annual["real_gdp_nominal"].replace(0, pd.NA)
-    annual["inflation_yoy"] = annual.get("gdp_deflator", annual["cpi"]).pct_change()
-    annual["cpi_inflation_yoy"] = annual["cpi"].pct_change()
-    annual["gdp_growth_yoy"] = annual["gdp_nominal"].pct_change()
-    annual["population_growth_yoy"] = annual["population"].pct_change()
+    inflation_base = annual["gdp_deflator"] if "gdp_deflator" in annual.columns else annual.get("cpi")
+    annual["inflation_yoy"] = (
+        pd.to_numeric(inflation_base, errors="coerce").pct_change(fill_method=None)
+        if inflation_base is not None
+        else pd.Series([float("nan")] * len(annual), dtype=float)
+    )
+    annual["cpi_inflation_yoy"] = (
+        pd.to_numeric(annual["cpi"], errors="coerce").pct_change(fill_method=None)
+        if "cpi" in annual.columns
+        else pd.Series([float("nan")] * len(annual), dtype=float)
+    )
+    annual["gdp_growth_yoy"] = (
+        pd.to_numeric(annual["gdp_nominal"], errors="coerce").pct_change(fill_method=None)
+        if "gdp_nominal" in annual.columns
+        else pd.Series([float("nan")] * len(annual), dtype=float)
+    )
+    annual["population_growth_yoy"] = (
+        pd.to_numeric(annual["population"], errors="coerce").pct_change(fill_method=None)
+        if "population" in annual.columns
+        else pd.Series([float("nan")] * len(annual), dtype=float)
+    )
     annual["avg_unemployment_rate"] = annual.get("unemployment_rate", pd.Series(dtype=float))
     if {"government_labor_tax_revenue", "gdp_nominal"}.issubset(annual.columns):
         annual["government_labor_tax_burden_gdp"] = (
@@ -253,10 +494,12 @@ def _style_axis(ax, title: str, ylabel: str) -> None:
 
 
 def _plot_line_set(ax, frame: pd.DataFrame, x: str, columns: list[tuple[str, str]], ylabel: str) -> None:
+    plotted = False
     for column, label in columns:
         if column in frame.columns:
-            ax.plot(frame[x], frame[column], label=label, linewidth=1.8)
-    ax.legend(fontsize=8, loc="best")
+            plotted |= _plot_numeric_line(ax, frame[x], frame[column], label=label, linewidth=1.8)
+    if plotted:
+        ax.legend(fontsize=8, loc="best")
     ax.set_xlabel("Ano", fontsize=9)
     ax.set_ylabel(ylabel, fontsize=9)
     ax.grid(True, alpha=0.25)
@@ -305,16 +548,18 @@ def _make_macro_figure(annual: pd.DataFrame, output_path: Path) -> None:
     _style_axis(axes[1, 0], "IPC y salarios", "Indice o dinero")
 
     ax = axes[1, 1]
+    plotted = False
     for column, label in [
         ("essential_production_units", "Producidos"),
         ("essential_sales_units", "Comprados"),
         ("essential_demand_units", "Necesarios"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
     if "full_essential_coverage_share" in annual.columns:
         ax2 = ax.twinx()
-        ax2.plot(
+        plotted_secondary = _plot_numeric_line(
+            ax2,
             annual["year"],
             annual["full_essential_coverage_share"],
             color="#2F855A",
@@ -326,8 +571,9 @@ def _make_macro_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ax2.tick_params(axis="y", labelsize=8)
         handles, labels = ax.get_legend_handles_labels()
         handles2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(handles + handles2, labels + labels2, fontsize=8, loc="best")
-    else:
+        if plotted or plotted_secondary:
+            ax.legend(handles + handles2, labels + labels2, fontsize=8, loc="best")
+    elif plotted:
         ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Canasta necesaria producida vs comprada", "Unidades")
     ax.set_xlabel("Ano", fontsize=9)
@@ -341,27 +587,34 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
     ax = axes[0, 0]
     plotted = False
     if "population" in annual.columns:
-        ax.plot(
+        plotted |= _plot_numeric_line(
+            ax,
             annual["year"],
             annual["population"],
             label="Poblacion total",
             linewidth=2.2,
             color="#1d4ed8",
         )
-        plotted = True
     for column, label, color in [
         ("fertile_women", "Mujeres fertiles", "#b45309"),
         ("births", "Nacimientos", "#16a34a"),
         ("deaths", "Muertes", "#dc2626"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.6, color=color)
-            plotted = True
+            plotted |= _plot_numeric_line(
+                ax,
+                annual["year"],
+                annual[column],
+                label=label,
+                linewidth=1.6,
+                color=color,
+            )
     if plotted:
         ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Poblacion total, natalidad y mortalidad", "Personas")
 
     ax = axes[0, 1]
+    plotted = False
     for column, label in [
         ("government_tax_revenue", "Ingresos"),
         ("government_labor_tax_revenue", "Impuestos al trabajo"),
@@ -371,11 +624,13 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ("government_countercyclical_spending", "Gasto anticiclico"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
     if "government_debt_outstanding" in annual.columns or "recession_intensity" in annual.columns:
         ax2 = ax.twinx()
+        plotted_secondary = False
         if "government_debt_outstanding" in annual.columns:
-            ax2.plot(
+            plotted_secondary |= _plot_numeric_line(
+                ax2,
                 annual["year"],
                 annual["government_debt_outstanding"],
                 color="#805AD5",
@@ -384,7 +639,8 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
                 label="Deuda",
             )
         if "recession_intensity" in annual.columns:
-            ax2.plot(
+            plotted_secondary |= _plot_numeric_line(
+                ax2,
                 annual["year"],
                 annual["recession_intensity"],
                 color="#C53030",
@@ -396,12 +652,14 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ax2.tick_params(axis="y", labelsize=8)
         handles, labels = ax.get_legend_handles_labels()
         handles2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(handles + handles2, labels + labels2, fontsize=8, loc="best")
-    else:
+        if plotted or plotted_secondary:
+            ax.legend(handles + handles2, labels + labels2, fontsize=8, loc="best")
+    elif plotted:
         ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Gobierno: recaudo, gasto y deuda", "Unidades monetarias")
 
     ax = axes[1, 0]
+    plotted = False
     for column, label in [
         ("bank_equity", "Patrimonio bancario"),
         ("bank_capital_ratio", "Capital/activos"),
@@ -409,11 +667,13 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ("bank_undercapitalized_share", "Bancos subcapitalizados"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
-    ax.legend(fontsize=8, loc="best")
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
+    if plotted:
+        ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Bancos comerciales", "Unidades o tasa")
 
     ax = axes[1, 1]
+    plotted = False
     for column, label in [
         ("central_bank_money_supply", "Oferta monetaria"),
         ("central_bank_target_money_supply", "Oferta objetivo"),
@@ -423,8 +683,9 @@ def _make_public_sector_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ("average_bank_reserve_ratio", "Encaje efectivo"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
-    ax.legend(fontsize=8, loc="best")
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
+    if plotted:
+        ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Banco central", "Unidades o tasa")
 
     fig.savefig(output_path, dpi=180, bbox_inches="tight")
@@ -444,10 +705,10 @@ def _make_expenditure_figure(annual: pd.DataFrame, output_path: Path) -> None:
     plotted = False
     for column, label in expenditure_columns:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
-            plotted = True
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
     if "gdp_expenditure_gap_share_gdp" in annual.columns:
-        ax.plot(
+        plotted |= _plot_numeric_line(
+            ax,
             annual["year"],
             annual["gdp_expenditure_gap_share_gdp"],
             label="Brecha identidad gasto",
@@ -455,13 +716,13 @@ def _make_expenditure_figure(annual: pd.DataFrame, output_path: Path) -> None:
             linestyle="--",
             color="#805AD5",
         )
-        plotted = True
     if plotted:
         ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Distribucion del PIB por gasto", "Participacion del PIB")
     ax.set_xlabel("Ano", fontsize=9)
 
     ax = axes[1]
+    plotted = False
     for column, label in [
         ("government_tax_burden_gdp", "T / PIB"),
         ("government_labor_tax_burden_gdp", "Trabajo / PIB"),
@@ -470,8 +731,9 @@ def _make_expenditure_figure(annual: pd.DataFrame, output_path: Path) -> None:
         ("government_spending_share_gdp", "Gasto Estado / PIB"),
     ]:
         if column in annual.columns:
-            ax.plot(annual["year"], annual[column], label=label, linewidth=1.8)
-    ax.legend(fontsize=8, loc="best")
+            plotted |= _plot_numeric_line(ax, annual["year"], annual[column], label=label, linewidth=1.8)
+    if plotted:
+        ax.legend(fontsize=8, loc="best")
     _style_axis(ax, "Carga tributaria y tamano del Estado", "Participacion del PIB")
     ax.set_xlabel("Ano", fontsize=9)
 
@@ -810,8 +1072,12 @@ def run_country_reports(
     periods_per_year: int,
     output_dir: Path,
     workers: int = 0,
+    audit_firms_sample: int = 20,
+    audit_families_sample: int = 45,
     log_every: int = 25,
     phase_split_period: int = 0,
+    include_csv: bool = False,
+    include_pdf: bool = False,
 ) -> list[Path]:
     profiles = country_profiles()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -825,32 +1091,86 @@ def run_country_reports(
             "periods_per_year": periods_per_year,
             "policy_values": profile.values,
             "log_every": log_every,
+            "audit_firms_sample": audit_firms_sample,
+            "audit_families_sample": audit_families_sample,
         }
         for scenario_name, profile in profiles.items()
     ]
-    max_workers = workers if workers > 0 else min(len(scenario_payloads), max(1, (os.cpu_count() or 1) - 1))
-    results: dict[str, pd.DataFrame] = {}
+    max_workers = (
+        min(
+            workers,
+            len(scenario_payloads),
+            max(1, os.cpu_count() or 1),
+        )
+        if workers > 0
+        else min(len(scenario_payloads), max(1, os.cpu_count() or 1))
+    )
+    results: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_map = {executor.submit(_run_profile, payload): payload["scenario_name"] for payload in scenario_payloads}
         for future in concurrent.futures.as_completed(future_map):
-            scenario_name, frame_json = future.result()
-            results[scenario_name] = pd.read_json(StringIO(frame_json), orient="split")
+            scenario_name = future_map[future]
+            slug = _slugify(scenario_name)
+            try:
+                completed_name, bundle_json = future.result()
+                bundle = json.loads(bundle_json)
+                monthly = pd.read_json(StringIO(bundle["monthly"]), orient="split")
+                firm_audit = pd.read_json(StringIO(bundle["firm_audit"]), orient="split")
+                family_audit = pd.read_json(StringIO(bundle["family_audit"]), orient="split")
+                firm_audit = _sample_audit_entities(
+                    firm_audit,
+                    id_column="firm_id",
+                    sample_size=audit_firms_sample,
+                    random_state=_scenario_sample_seed(seed, completed_name, "firm_audit"),
+                )
+                family_audit = _sample_audit_entities(
+                    family_audit,
+                    id_column="family_id",
+                    sample_size=audit_families_sample,
+                    random_state=_scenario_sample_seed(seed, completed_name, "family_audit"),
+                )
+                annual = _annualize_core_history(monthly)
+                _write_country_xlsx(output_dir / f"{slug}.xlsx", monthly, annual, firm_audit, family_audit)
+                if include_csv:
+                    monthly.to_csv(output_dir / f"{slug}_mensual.csv", index=False)
+                    annual.to_csv(output_dir / f"{slug}_anual.csv", index=False)
+                results[completed_name] = (monthly, annual, firm_audit, family_audit)
+            except Exception as exc:
+                error_path = output_dir / f"{slug}_error.txt"
+                error_path.write_text(
+                    f"Scenario: {scenario_name}\nError: {exc}\n\n{traceback.format_exc()}",
+                    encoding="utf-8",
+                )
+
+    xlsx_paths = [
+        output_dir / f"{_slugify(scenario_name)}.xlsx"
+        for scenario_name in profiles
+        if (output_dir / f"{_slugify(scenario_name)}.xlsx").exists()
+    ]
+    if not include_pdf:
+        return xlsx_paths
 
     pdf_paths: list[Path] = []
     for scenario_name, profile in profiles.items():
-        monthly = results[scenario_name]
-        annual = _annualize_core_history(monthly)
+        result = results.get(scenario_name)
+        if result is None:
+            continue
+        monthly, annual, _firm_audit, _family_audit = result
         slug = _slugify(scenario_name)
-        monthly.to_csv(output_dir / f"{slug}_mensual.csv", index=False)
-        annual.to_csv(output_dir / f"{slug}_anual.csv", index=False)
         pdf_path = output_dir / f"{slug}.pdf"
-        _build_pdf_report(
-            profile=profile,
-            monthly=monthly,
-            annual=annual,
-            output_pdf=pdf_path,
-        )
-        pdf_paths.append(pdf_path)
+        try:
+            _build_pdf_report(
+                profile=profile,
+                monthly=monthly,
+                annual=annual,
+                output_pdf=pdf_path,
+            )
+            pdf_paths.append(pdf_path)
+        except Exception as exc:
+            (output_dir / f"{slug}_pdf_error.txt").write_text(
+                f"Scenario: {scenario_name}\nError building main PDF: {exc}\n\n{traceback.format_exc()}",
+                encoding="utf-8",
+            )
         if 0 < phase_split_period < periods:
             phase_ranges = [
                 (1, phase_split_period, 1),
@@ -861,24 +1181,34 @@ def run_country_reports(
                 if phase_monthly.empty or phase_annual.empty:
                     continue
                 phase_suffix = f"fase_{phase_index}_{start_period}_{end_period}"
-                phase_monthly.to_csv(output_dir / f"{slug}_{phase_suffix}_mensual.csv", index=False)
-                phase_annual.to_csv(output_dir / f"{slug}_{phase_suffix}_anual.csv", index=False)
+                if include_csv:
+                    phase_monthly.to_csv(output_dir / f"{slug}_{phase_suffix}_mensual.csv", index=False)
+                    phase_annual.to_csv(output_dir / f"{slug}_{phase_suffix}_anual.csv", index=False)
                 phase_pdf_path = output_dir / f"{slug}_{phase_suffix}.pdf"
-                _build_pdf_report(
-                    profile=profile,
-                    monthly=phase_monthly,
-                    annual=phase_annual,
-                    output_pdf=phase_pdf_path,
-                    phase_label=_phase_label(start_period, end_period, phase_index),
-                )
-                pdf_paths.append(phase_pdf_path)
-    return pdf_paths
+                try:
+                    _build_pdf_report(
+                        profile=profile,
+                        monthly=phase_monthly,
+                        annual=phase_annual,
+                        output_pdf=phase_pdf_path,
+                        phase_label=_phase_label(start_period, end_period, phase_index),
+                    )
+                    pdf_paths.append(phase_pdf_path)
+                except Exception as exc:
+                    (output_dir / f"{slug}_{phase_suffix}_pdf_error.txt").write_text(
+                        (
+                            f"Scenario: {scenario_name}\n"
+                            f"Error building phase PDF {phase_suffix}: {exc}\n\n{traceback.format_exc()}"
+                        ),
+                        encoding="utf-8",
+                    )
+    return xlsx_paths + pdf_paths
 
 
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    pdf_paths = run_country_reports(
+    output_paths = run_country_reports(
         periods=args.periods,
         households=args.households,
         firms_per_sector=args.firms_per_sector,
@@ -886,11 +1216,15 @@ def main() -> int:
         periods_per_year=args.periods_per_year,
         output_dir=args.output_dir,
         workers=args.workers,
+        audit_firms_sample=args.audit_firms_sample,
+        audit_families_sample=args.audit_families_sample,
         log_every=args.log_every,
         phase_split_period=args.phase_split_period,
+        include_csv=args.include_csv,
+        include_pdf=args.include_pdf,
     )
-    print("PDF reports written:")
-    for path in pdf_paths:
+    print("Archivos generados:")
+    for path in output_paths:
         print(f"  {path}")
     return 0
 
