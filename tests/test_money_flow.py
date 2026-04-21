@@ -9,11 +9,16 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from economy_simulator.batch_reports import _annualize_core_history, _summary_tables
+from economy_simulator.batch_reports import (
+    _annualize_core_history,
+    _sample_audit_entities,
+    _scenario_sample_seed,
+    _summary_tables,
+)
 from economy_simulator.domain import ESSENTIAL_SECTOR_KEYS, Entrepreneur, SECTOR_BY_KEY, SECTOR_SPECS, SimulationConfig
 from economy_simulator.engine import EconomySimulation, PUBLIC_ADMINISTRATION_EMPLOYER_ID
 from economy_simulator.policies import scenario_policy_presets, social_state_intensive_profile
-from economy_simulator.reporting import annual_frame, core_history_frame, history_frame
+from economy_simulator.reporting import annual_frame, core_history_frame, family_audit_frame, firm_audit_frame, firm_history_frame, history_frame
 
 
 def _initial_liquid_money(sim: EconomySimulation) -> float:
@@ -317,6 +322,77 @@ class MoneyFlowTests(unittest.TestCase):
             desired_workers,
             math.ceil(desired_output / effective_productivity),
         )
+
+    def test_target_headcount_waits_when_capacity_signal_is_not_persistent(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=60, firms_per_sector=2, seed=30)
+        )
+        firm = next(
+            firm
+            for firm in sim.firms
+            if firm.active and firm.sector in ESSENTIAL_SECTOR_KEYS
+        )
+        firm.workers = [0, 1, 2, 3, 4]
+        firm.age = 6
+        firm.inventory = 0.0
+        firm.last_sales = 150.0
+        firm.sales_history = [118.0, 121.0, 150.0]
+        firm.last_expected_sales = 120.0
+        firm.expected_sales_history = [120.0, 120.0, 120.0]
+        firm.last_production = 80.0
+        firm.employment_inertia = 0.90
+        effective_productivity = 25.0
+        target_inventory = sim._firm_target_inventory_units(firm, 150.0)
+
+        raw_target = sim._workers_needed_for_units(
+            sim._firm_desired_output_from_expected_sales(firm, 150.0),
+            effective_productivity,
+        )
+        target_headcount = sim._target_headcount_for_expected_sales(
+            firm,
+            150.0,
+            effective_productivity,
+            target_inventory=target_inventory,
+        )
+
+        self.assertGreater(raw_target, len(firm.workers))
+        self.assertEqual(target_headcount, len(firm.workers))
+
+    def test_target_headcount_expands_gradually_under_persistent_shortage(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=60, firms_per_sector=2, seed=31)
+        )
+        firm = next(
+            firm
+            for firm in sim.firms
+            if firm.active and firm.sector in ESSENTIAL_SECTOR_KEYS
+        )
+        firm.workers = [0, 1, 2, 3, 4]
+        firm.age = 8
+        firm.inventory = 0.0
+        firm.last_sales = 170.0
+        firm.sales_history = [150.0, 162.0, 170.0]
+        firm.last_expected_sales = 120.0
+        firm.expected_sales_history = [118.0, 120.0, 122.0]
+        firm.last_production = 124.0
+        firm.employment_inertia = 0.88
+        effective_productivity = 25.0
+        target_inventory = sim._firm_target_inventory_units(firm, 170.0)
+
+        raw_target = sim._workers_needed_for_units(
+            sim._firm_desired_output_from_expected_sales(firm, 170.0),
+            effective_productivity,
+        )
+        target_headcount = sim._target_headcount_for_expected_sales(
+            firm,
+            170.0,
+            effective_productivity,
+            target_inventory=target_inventory,
+        )
+
+        self.assertGreater(raw_target, len(firm.workers))
+        self.assertGreater(target_headcount, len(firm.workers))
+        self.assertLess(target_headcount, raw_target)
 
     def test_smoothed_sales_reference_uses_six_month_moving_average(self) -> None:
         sim = EconomySimulation(
@@ -661,6 +737,220 @@ class MoneyFlowTests(unittest.TestCase):
         result = sim.run()
 
         self.assertEqual(result.firm_history, [])
+
+    def test_firm_history_tracks_worker_exit_breakdown_and_reemployment_for_audit(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=58)
+        )
+        source_firm = next(firm for firm in sim.firms if firm.active and len(firm.workers) >= 1)
+        target_firm = next(
+            firm for firm in sim.firms
+            if firm.active and firm.id != source_firm.id
+        )
+        starting_workers = len(source_firm.workers)
+        moved_worker_id = source_firm.workers[0]
+
+        sim._reset_period_counters()
+        sim._release_household_from_employment(sim.households[moved_worker_id], exit_reason="quit")
+        sim._assign_household_to_employer(sim.households[moved_worker_id], target_firm.id, target_firm.wage_offer)
+        sim.period = 1
+
+        snapshots = sim._build_firm_period_snapshots()
+        source_snapshot = next(snapshot for snapshot in snapshots if snapshot.firm_id == source_firm.id)
+
+        self.assertEqual(source_snapshot.starting_workers, starting_workers)
+        self.assertEqual(source_snapshot.worker_exits, 1)
+        self.assertEqual(source_snapshot.worker_quits, 1)
+        self.assertEqual(source_snapshot.worker_dismissals, 0)
+        self.assertEqual(source_snapshot.exited_workers_reemployed, 1)
+
+    def test_firm_audit_frame_merges_macro_labor_context(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=2,
+                households=120,
+                firms_per_sector=2,
+                seed=59,
+                track_firm_history=True,
+            )
+        )
+        result = sim.run()
+
+        firms = firm_history_frame(result)
+        macro = history_frame(
+            result.history,
+            periods_per_year=result.config.periods_per_year,
+            target_unemployment=result.config.target_unemployment,
+        )
+        audit = firm_audit_frame(firms, macro)
+
+        self.assertFalse(audit.empty)
+        for column in (
+            "starting_workers",
+            "worker_exits",
+            "worker_quits",
+            "worker_dismissals",
+            "exited_workers_reemployed",
+            "firm_income_total",
+            "firm_profit_total",
+            "payroll_total",
+            "desired_workers_next_period",
+            "average_wage",
+            "unemployment_rate",
+        ):
+            self.assertIn(column, audit.columns)
+        merged = audit.merge(
+            firms[["period", "firm_id", "revenue", "desired_workers"]],
+            on=["period", "firm_id"],
+            how="left",
+        )
+        self.assertTrue((merged["firm_income_total"] == merged["revenue"]).all())
+        self.assertTrue((merged["desired_workers_next_period"] == merged["desired_workers"]).all())
+
+    def test_family_audit_frame_reports_worker_side_metrics(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=60)
+        )
+
+        sim.step()
+        audit = family_audit_frame(sim)
+
+        self.assertFalse(audit.empty)
+        for column in (
+            "total_basic_basket_cost_including_school",
+            "private_school_basket_cost",
+            "total_family_income",
+            "family_employment_rate",
+            "family_cash_available",
+            "family_cash_spent",
+            "family_voluntary_saved_cash",
+            "family_involuntary_retained_cash",
+            "marginal_propensity_to_spend",
+            "marginal_propensity_to_save",
+            "necessary_essential_demand_units",
+            "essential_offer_units",
+            "necessary_demand_to_offer_ratio",
+        ):
+            self.assertIn(column, audit.columns)
+        self.assertTrue((audit["total_basic_basket_cost_including_school"] >= audit["private_school_basket_cost"]).all())
+        self.assertTrue(((audit["family_employment_rate"] >= 0.0) & (audit["family_employment_rate"] <= 1.0)).all())
+        self.assertTrue(
+            ((audit["marginal_propensity_to_spend"] + audit["marginal_propensity_to_save"]) - 1.0).abs().max() < 1e-9
+        )
+        self.assertTrue((audit["family_cash_available"] >= audit["family_cash_spent"]).all())
+        self.assertTrue(
+            (
+                audit["family_cash_available"]
+                >= audit["family_voluntary_saved_cash"] + audit["family_involuntary_retained_cash"]
+            ).all()
+        )
+        self.assertTrue((audit["necessary_essential_demand_units"] >= 0.0).all())
+        self.assertTrue((audit["essential_offer_units"] >= 0.0).all())
+        self.assertTrue((audit["necessary_demand_to_offer_ratio"] >= 0.0).all())
+
+    def test_family_audit_frame_keeps_period_history_when_tracking_enabled(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=2,
+                households=120,
+                firms_per_sector=2,
+                seed=62,
+                track_family_history=True,
+            )
+        )
+
+        sim.run()
+        audit = family_audit_frame(sim)
+
+        self.assertFalse(audit.empty)
+        self.assertEqual(sorted(audit["period"].unique().tolist()), [1, 2])
+
+    def test_family_audit_propensities_use_period_flows_not_savings_stock(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=63)
+        )
+
+        sim.step()
+        audit_before = family_audit_frame(sim)
+        target_family_id = int(audit_before.iloc[0]["family_id"])
+        before_row = audit_before[audit_before["family_id"] == target_family_id].iloc[0]
+        for member in sim._family_groups()[target_family_id]:
+            member.savings += 1_000_000.0
+
+        audit_after = family_audit_frame(sim)
+        after_row = audit_after[audit_after["family_id"] == target_family_id].iloc[0]
+
+        self.assertAlmostEqual(
+            before_row["marginal_propensity_to_spend"],
+            after_row["marginal_propensity_to_spend"],
+        )
+        self.assertAlmostEqual(
+            before_row["marginal_propensity_to_save"],
+            after_row["marginal_propensity_to_save"],
+        )
+
+    def test_simulation_config_defaults_to_5000_households(self) -> None:
+        config = SimulationConfig()
+
+        self.assertEqual(config.households, 5000)
+
+    def test_family_audit_frame_zero_school_cost_when_government_covers_school(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=120,
+                firms_per_sector=2,
+                seed=61,
+                public_school_min_target_units=1.0,
+                public_school_support_package_share=1.0,
+            )
+        )
+
+        sim.step()
+        audit = family_audit_frame(sim)
+
+        self.assertFalse(audit.empty)
+        self.assertTrue((audit["private_school_basket_cost"] >= 0.0).all())
+        self.assertGreaterEqual((audit["private_school_basket_cost"] == 0.0).sum(), 1)
+
+    def test_sample_audit_entities_limits_random_family_sample(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "family_id": list(range(1, 81)),
+                "period": [1] * 80,
+                "total_family_income": [float(index) for index in range(1, 81)],
+            }
+        )
+
+        sampled = _sample_audit_entities(
+            frame,
+            id_column="family_id",
+            sample_size=45,
+            random_state=_scenario_sample_seed(7, "Guatemala (mas liberal)", "family_audit"),
+        )
+
+        self.assertEqual(sampled["family_id"].nunique(), 45)
+        self.assertEqual(len(sampled), 45)
+
+    def test_sample_audit_entities_keeps_full_history_for_selected_firms(self) -> None:
+        frame = pd.DataFrame(
+            {
+                "firm_id": [firm_id for firm_id in range(1, 31) for _ in range(3)],
+                "period": [1, 2, 3] * 30,
+                "sales": [10.0] * 90,
+            }
+        )
+
+        sampled = _sample_audit_entities(
+            frame,
+            id_column="firm_id",
+            sample_size=20,
+            random_state=_scenario_sample_seed(7, "Noruega (economia del bienestar)", "firm_audit"),
+        )
+
+        self.assertEqual(sampled["firm_id"].nunique(), 20)
+        counts = sampled.groupby("firm_id").size()
+        self.assertTrue((counts == 3).all())
 
     def test_history_frame_exposes_core_macro_columns(self) -> None:
         sim = EconomySimulation(

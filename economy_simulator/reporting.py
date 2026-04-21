@@ -4,7 +4,7 @@ from dataclasses import asdict
 
 import pandas as pd
 
-from .domain import FirmPeriodSnapshot, PeriodSnapshot, SimulationResult
+from .domain import FirmPeriodSnapshot, PeriodSnapshot, SECTOR_BY_KEY, SECTOR_SPECS, SimulationResult
 
 
 CORE_HISTORY_COLUMNS = [
@@ -801,54 +801,161 @@ def firm_history_frame(result: SimulationResult) -> pd.DataFrame:
     if not result.firm_history:
         return pd.DataFrame()
 
-    return pd.DataFrame.from_records(
-        {
-            "period": snapshot.period,
-            "year": snapshot.year,
-            "period_in_year": snapshot.period_in_year,
-            "firm_id": snapshot.firm_id,
-            "sector": snapshot.sector,
-            "active": snapshot.active,
-            "workers": snapshot.workers,
-            "desired_workers": snapshot.desired_workers,
-            "vacancies": snapshot.vacancies,
-            "price": snapshot.price,
-            "wage_offer": snapshot.wage_offer,
-            "cash": snapshot.cash,
-            "capital": snapshot.capital,
-            "inventory": snapshot.inventory,
-            "productivity": snapshot.productivity,
-            "input_cost_per_unit": snapshot.input_cost_per_unit,
-            "transport_cost_per_unit": snapshot.transport_cost_per_unit,
-            "fixed_overhead": snapshot.fixed_overhead,
-            "capital_charge": snapshot.capital_charge,
-            "unit_cost": snapshot.unit_cost,
-            "markup_tolerance": snapshot.markup_tolerance,
-            "volume_preference": snapshot.volume_preference,
-            "inventory_aversion": snapshot.inventory_aversion,
-            "employment_inertia": snapshot.employment_inertia,
-            "price_aggressiveness": snapshot.price_aggressiveness,
-            "cash_conservatism": snapshot.cash_conservatism,
-            "market_share_ambition": snapshot.market_share_ambition,
-            "forecast_caution": snapshot.forecast_caution,
-            "technology": snapshot.technology,
-            "technology_investment": snapshot.technology_investment,
-            "technology_gain": snapshot.technology_gain,
-            "sales": snapshot.sales,
-            "expected_sales": snapshot.expected_sales,
-            "revenue": snapshot.revenue,
-            "production": snapshot.production,
-            "profit": snapshot.profit,
-            "total_cost": snapshot.total_cost,
-            "loss_streak": snapshot.loss_streak,
-            "market_share": snapshot.market_share,
-            "market_fragility_belief": snapshot.market_fragility_belief,
-            "forecast_error_belief": snapshot.forecast_error_belief,
-            "target_inventory": snapshot.target_inventory,
-            "age": snapshot.age,
-        }
-        for snapshot in result.firm_history
+    return pd.DataFrame.from_records(asdict(snapshot) for snapshot in result.firm_history)
+
+
+def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFrame) -> pd.DataFrame:
+    if firm_history_frame.empty:
+        return firm_history_frame.copy()
+
+    audit = firm_history_frame.copy()
+    defaults = {
+        "starting_workers": audit.get("workers", pd.Series([0] * len(audit), index=audit.index)),
+        "worker_exits": pd.Series([0] * len(audit), index=audit.index),
+        "worker_quits": pd.Series([0] * len(audit), index=audit.index),
+        "worker_dismissals": pd.Series([0] * len(audit), index=audit.index),
+        "exited_workers_reemployed": pd.Series([0] * len(audit), index=audit.index),
+        "payroll_total": pd.Series([0.0] * len(audit), index=audit.index),
+    }
+    for column, default_values in defaults.items():
+        if column not in audit.columns:
+            audit[column] = default_values
+
+    context_columns = ["period"]
+    for column in ("average_wage", "unemployment_rate"):
+        if column in history_frame.columns:
+            context_columns.append(column)
+    if len(context_columns) > 1:
+        audit = audit.merge(history_frame[context_columns], on="period", how="left")
+    else:
+        audit["average_wage"] = pd.NA
+        audit["unemployment_rate"] = pd.NA
+
+    audit["firm_income_total"] = audit["revenue"]
+    audit["firm_profit_total"] = audit["profit"]
+    audit["desired_workers_next_period"] = audit["desired_workers"]
+    ordered_columns = [
+        "period",
+        "year",
+        "period_in_year",
+        "firm_id",
+        "sector",
+        "starting_workers",
+        "expected_sales",
+        "sales",
+        "inventory",
+        "price",
+        "payroll_total",
+        "total_cost",
+        "firm_income_total",
+        "firm_profit_total",
+        "desired_workers_next_period",
+        "worker_exits",
+        "worker_quits",
+        "worker_dismissals",
+        "exited_workers_reemployed",
+        "average_wage",
+        "unemployment_rate",
+    ]
+    available_columns = [column for column in ordered_columns if column in audit.columns]
+    return audit[available_columns].sort_values(["period", "sector", "firm_id"]).reset_index(drop=True)
+
+
+def family_audit_frame(simulation) -> pd.DataFrame:
+    family_history = getattr(simulation, "family_history", None)
+    if family_history:
+        return pd.DataFrame.from_records(
+            asdict(snapshot) for snapshot in family_history
+        ).sort_values(["period", "family_id"]).reset_index(drop=True)
+
+    simulation._refresh_period_household_caches()
+    simulation._refresh_period_family_cache()
+
+    groups = simulation._family_groups()
+    if not groups:
+        return pd.DataFrame()
+
+    sector_prices = {
+        spec.key: simulation._average_sector_price(spec.key)
+        for spec in SECTOR_SPECS
+    }
+    necessary_essential_demand_units = max(0.0, simulation._period_essential_demand_units)
+    essential_offer_units = max(0.0, simulation._period_essential_production_units)
+    necessary_demand_to_offer_ratio = (
+        necessary_essential_demand_units / max(1.0, essential_offer_units)
+        if essential_offer_units > 0.0
+        else (1.0 if necessary_essential_demand_units > 0.0 else 0.0)
     )
+    rows: list[dict[str, float | int]] = []
+    for family_id, members in groups.items():
+        alive_members = [member for member in members if member.alive]
+        if not alive_members:
+            continue
+        adults = [
+            member
+            for member in alive_members
+            if simulation._household_age_years(member) >= simulation.config.entry_age_years
+        ]
+        labor_capable_members = [
+            member for member in alive_members if simulation._household_labor_capacity(member) > 0.0
+        ]
+        employed_members = sum(1 for member in labor_capable_members if member.employed_by is not None)
+
+        essential_basket_cost = sum(simulation._essential_budget(member) for member in alive_members)
+        private_school_basket_cost = 0.0
+        for member in alive_members:
+            school_target_units = simulation._household_sector_desired_units(member, "school")
+            public_school_units = (
+                simulation._public_education_target_units(member, "school", school_target_units)
+                if simulation.config.government_enabled
+                else 0.0
+            )
+            private_school_units = max(0.0, school_target_units - public_school_units)
+            private_school_basket_cost += private_school_units * sector_prices["school"]
+
+        family_income_total = sum(max(0.0, member.last_income) for member in alive_members)
+        family_cash_available = max(0.0, simulation._period_family_cash_available.get(family_id, 0.0))
+        family_saved_cash = max(0.0, simulation._period_family_cash_saved.get(family_id, 0.0))
+        family_spent_cash = max(0.0, simulation._period_family_cash_spent.get(family_id, 0.0))
+        family_voluntary_saved_cash = max(0.0, simulation._period_family_voluntary_saved_cash.get(family_id, 0.0))
+        family_involuntary_retained_cash = max(
+            0.0,
+            simulation._period_family_involuntary_retained_cash.get(family_id, 0.0),
+        )
+        if family_cash_available > 0.0:
+            propensity_to_save = min(1.0, max(0.0, family_saved_cash / family_cash_available))
+            propensity_to_spend = min(1.0, max(0.0, family_spent_cash / family_cash_available))
+        else:
+            propensity_to_save = 0.0
+            propensity_to_spend = 0.0
+
+        rows.append(
+            {
+                "period": simulation.period,
+                "year": ((simulation.period - 1) // max(1, simulation.config.periods_per_year)) + 1,
+                "period_in_year": ((simulation.period - 1) % max(1, simulation.config.periods_per_year)) + 1,
+                "family_id": family_id,
+                "family_members": len(alive_members),
+                "adult_members": len(adults),
+                "labor_capable_members": len(labor_capable_members),
+                "employed_members": employed_members,
+                "total_basic_basket_cost_including_school": essential_basket_cost + private_school_basket_cost,
+                "private_school_basket_cost": private_school_basket_cost,
+                "total_family_income": family_income_total,
+                "family_employment_rate": employed_members / max(1, len(labor_capable_members)),
+                "family_cash_available": family_cash_available,
+                "family_cash_spent": family_spent_cash,
+                "family_voluntary_saved_cash": family_voluntary_saved_cash,
+                "family_involuntary_retained_cash": family_involuntary_retained_cash,
+                "marginal_propensity_to_spend": propensity_to_spend,
+                "marginal_propensity_to_save": propensity_to_save,
+                "necessary_essential_demand_units": necessary_essential_demand_units,
+                "essential_offer_units": essential_offer_units,
+                "necessary_demand_to_offer_ratio": necessary_demand_to_offer_ratio,
+            }
+        )
+
+    return pd.DataFrame.from_records(rows).sort_values(["period", "family_id"]).reset_index(drop=True)
 
 
 def firm_period_summary(firm_history_frame: pd.DataFrame) -> pd.DataFrame:
