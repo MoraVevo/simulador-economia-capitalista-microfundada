@@ -4640,6 +4640,77 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertLess(adjusted_target_price, firm.price)
         self.assertGreaterEqual(adjusted_target_price, variable_unit_cost * 1.01)
 
+    def test_food_social_distress_pushes_target_price_toward_cost_when_margin_exists(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=3, seed=45)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        spec = SECTOR_BY_KEY[firm.sector]
+
+        firm.price = 12.0
+        firm.last_unit_cost = 8.0
+        firm.markup_tolerance = 1.0
+        firm.volume_preference = 1.15
+
+        average_unit_cost = 7.0
+        variable_unit_cost = 5.5
+
+        with patch.object(sim, "_firm_actionable_essential_price_distress", return_value=0.0):
+            baseline_target = sim._target_price_for_firm(
+                firm,
+                spec,
+                average_unit_cost,
+                variable_unit_cost,
+            )
+
+        with patch.object(sim, "_firm_actionable_essential_price_distress", return_value=1.0):
+            stressed_target = sim._target_price_for_firm(
+                firm,
+                spec,
+                average_unit_cost,
+                variable_unit_cost,
+            )
+
+        self.assertLess(stressed_target, baseline_target)
+        self.assertLess(stressed_target, firm.price)
+        self.assertGreaterEqual(stressed_target, variable_unit_cost * 1.01)
+
+    def test_food_price_objective_penalizes_high_markup_under_social_distress(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=3, seed=46)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        spec = SECTOR_BY_KEY[firm.sector]
+        variable_unit_cost = 5.5
+
+        with patch.object(sim, "_firm_actionable_essential_price_distress", return_value=0.0):
+            neutral_objective = sim._candidate_price_objective(
+                firm,
+                spec,
+                effective_price=12.0,
+                prudent_sales=100.0,
+                candidate_profit=500.0,
+                future_market_value=0.0,
+                market_hazard=0.0,
+                variable_unit_cost=variable_unit_cost,
+                fixed_cost=0.0,
+            )
+
+        with patch.object(sim, "_firm_actionable_essential_price_distress", return_value=1.0):
+            stressed_objective = sim._candidate_price_objective(
+                firm,
+                spec,
+                effective_price=12.0,
+                prudent_sales=100.0,
+                candidate_profit=500.0,
+                future_market_value=0.0,
+                market_hazard=0.0,
+                variable_unit_cost=variable_unit_cost,
+                fixed_cost=0.0,
+            )
+
+        self.assertLess(stressed_objective, neutral_objective)
+
     def test_nonessential_target_margin_falls_when_sales_are_lost(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=180, firms_per_sector=3, startup_grace_periods=0, seed=44)

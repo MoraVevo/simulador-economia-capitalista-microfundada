@@ -4883,6 +4883,49 @@ class EconomySimulation:
         scarcity_relief = clamp((1.0 - last_snapshot.essential_fulfillment_rate) / 0.80, 0.0, 1.0)
         return clamp(basket_gap * (1.0 - 0.80 * scarcity_relief), 0.0, 1.0)
 
+    def _essential_social_price_distress(self, sector_key: str) -> float:
+        if sector_key not in ESSENTIAL_SECTOR_KEYS or not self.history:
+            return 0.0
+        last_snapshot = self.history[-1]
+        resource_gap = clamp(1.0 - last_snapshot.family_resources_to_basket_ratio, 0.0, 1.5)
+        income_gap = clamp(1.0 - last_snapshot.family_income_to_basket_ratio, 0.0, 1.5)
+        below_resources = clamp(last_snapshot.families_resources_below_basket_share, 0.0, 1.0)
+        below_income = clamp(last_snapshot.families_income_below_basket_share, 0.0, 1.0)
+        basic_coverage_gap = clamp(1.0 - last_snapshot.full_essential_coverage_share, 0.0, 1.0)
+        food_distress = clamp(
+            0.45 * last_snapshot.food_acute_hunger_share
+            + 0.75 * last_snapshot.food_severe_hunger_share
+            + 0.20 * max(0.0, 1.0 - last_snapshot.food_sufficient_share),
+            0.0,
+            1.5,
+        )
+        pressure = clamp(
+            0.24 * resource_gap
+            + 0.16 * income_gap
+            + 0.20 * below_resources
+            + 0.12 * below_income
+            + 0.18 * basic_coverage_gap
+            + 0.10 * food_distress,
+            0.0,
+            1.5,
+        )
+        if sector_key == "food":
+            pressure = clamp(pressure + 0.45 * food_distress + 0.12 * basic_coverage_gap, 0.0, 1.8)
+        elif sector_key == "clothing":
+            pressure *= 0.80
+        return clamp(pressure, 0.0, 1.8)
+
+    def _firm_actionable_essential_price_distress(self, firm: Firm, spec, marginal_unit_cost: float) -> float:
+        if spec.key not in ESSENTIAL_SECTOR_KEYS:
+            return 0.0
+        price = max(0.1, firm.price)
+        margin_room = clamp((price - max(0.1, marginal_unit_cost)) / price, 0.0, 1.0)
+        if margin_room <= 0.0:
+            return 0.0
+        social_distress = self._essential_social_price_distress(spec.key)
+        sector_weight = 1.35 if spec.key == "food" else 0.95
+        return clamp(social_distress * sector_weight * (0.35 + 0.65 * margin_room), 0.0, 1.8)
+
     def _firm_cost_decline_ratio(self, firm: Firm, average_unit_cost: float) -> float:
         prior_unit_cost = max(0.1, firm.last_unit_cost)
         return clamp((prior_unit_cost - average_unit_cost) / prior_unit_cost, 0.0, 0.80)
@@ -4968,10 +5011,22 @@ class EconomySimulation:
 
         cost_decline_ratio = self._firm_cost_decline_ratio(firm, average_unit_cost)
         affordability_pressure = self._essential_affordability_pressure()
+        social_price_distress = self._firm_actionable_essential_price_distress(
+            firm,
+            spec,
+            average_unit_cost,
+        )
+        distress_weight = 0.72 if spec.key == "food" else 0.42
         return clamp(
             target_margin
-            * (1.0 - 0.50 * affordability_pressure - 0.35 * cost_decline_ratio - 0.18 * volume_recovery_pressure),
-            0.02,
+            * (
+                1.0
+                - 0.50 * affordability_pressure
+                - 0.35 * cost_decline_ratio
+                - 0.18 * volume_recovery_pressure
+                - distress_weight * social_price_distress
+            ),
+            0.006 if spec.key == "food" else 0.02,
             0.18,
         )
 
@@ -4983,10 +5038,16 @@ class EconomySimulation:
 
         cost_decline_ratio = self._firm_cost_decline_ratio(firm, average_unit_cost)
         affordability_pressure = self._essential_affordability_pressure()
+        social_price_distress = self._firm_actionable_essential_price_distress(
+            firm,
+            spec,
+            variable_unit_cost,
+        )
         pass_through_strength = clamp(
             0.30
             + 0.45 * cost_decline_ratio
             + 0.35 * affordability_pressure
+            + 0.38 * social_price_distress
             + 0.20 * max(0.0, firm.volume_preference - 1.0),
             0.15,
             0.95,
@@ -4994,6 +5055,14 @@ class EconomySimulation:
         if cost_decline_ratio > 0.0:
             pass_through_price = firm.price * (1.0 - pass_through_strength * cost_decline_ratio)
             target_price = min(target_price, pass_through_price)
+        if social_price_distress > 0.0:
+            social_cut = clamp(
+                (0.10 if spec.key == "food" else 0.06) * social_price_distress,
+                0.0,
+                0.22 if spec.key == "food" else 0.14,
+            )
+            social_relief_price = max(variable_unit_cost * 1.01, firm.price * (1.0 - social_cut))
+            target_price = min(target_price, social_relief_price)
         return max(variable_unit_cost * 1.01, target_price)
 
     def _candidate_price_objective(
@@ -5009,6 +5078,11 @@ class EconomySimulation:
         fixed_cost: float,
     ) -> float:
         affordability_pressure = self._essential_affordability_pressure() if spec.key in ESSENTIAL_SECTOR_KEYS else 0.0
+        social_price_distress = self._firm_actionable_essential_price_distress(
+            firm,
+            spec,
+            variable_unit_cost,
+        )
 
         # Rational objective: expected monthly profit plus retained market value,
         # minus fragility risk. Inventory costs are charged explicitly elsewhere.
@@ -5022,7 +5096,14 @@ class EconomySimulation:
             fixed_cost * (0.80 + 0.30 * firm.cash_conservatism)
             + 0.30 * future_market_value
         )
-        return candidate_profit + future_weight * future_market_value - hazard_penalty
+        margin_room = max(0.0, effective_price - variable_unit_cost)
+        social_markup_penalty = (
+            social_price_distress
+            * margin_room
+            * max(0.0, prudent_sales)
+            * (0.55 if spec.key == "food" else 0.28)
+        )
+        return candidate_profit + future_weight * future_market_value - hazard_penalty - social_markup_penalty
 
     def _candidate_total_profit(
         self,
@@ -8311,6 +8392,11 @@ class EconomySimulation:
             volume_recovery_pressure,
         )
         affordability_pressure = self._essential_affordability_pressure() if spec.key in ESSENTIAL_SECTOR_KEYS else 0.0
+        social_price_distress = self._firm_actionable_essential_price_distress(
+            firm,
+            spec,
+            variable_unit_cost,
+        )
         learning_maturity = self._firm_learning_maturity(firm)
         min_history = max(1, int(self.config.price_adjustment_min_history))
         history_depth = min(
@@ -8370,10 +8456,10 @@ class EconomySimulation:
         adjusted_multipliers: list[float] = []
         for multiplier in multipliers:
             if multiplier > 1.0:
-                upward_scale = clamp(1.0 - 0.70 * rejection_pressure, 0.12, 1.0)
+                upward_scale = clamp(1.0 - 0.70 * rejection_pressure - 0.55 * social_price_distress, 0.05, 1.0)
                 adjusted = 1.0 + (multiplier - 1.0) * upward_scale
             elif multiplier < 1.0:
-                downward_scale = clamp(1.0 + 0.55 * rejection_pressure, 1.0, 1.85)
+                downward_scale = clamp(1.0 + 0.55 * rejection_pressure + 0.65 * social_price_distress, 1.0, 2.20)
                 adjusted = 1.0 - (1.0 - multiplier) * downward_scale
             else:
                 adjusted = multiplier
@@ -8407,6 +8493,25 @@ class EconomySimulation:
                     ceiling_price,
                 )
             )
+        if social_price_distress > 0.10:
+            cut_strength = 0.14 if spec.key == "food" else 0.08
+            candidates.add(
+                clamp(
+                    firm.price * (1.0 - cut_strength * social_price_distress),
+                    search_floor_price,
+                    ceiling_price,
+                )
+            )
+        if social_price_distress > 0.35:
+            cut_strength = 0.26 if spec.key == "food" else 0.14
+            candidates.add(
+                clamp(
+                    firm.price * (1.0 - cut_strength * social_price_distress),
+                    search_floor_price,
+                    ceiling_price,
+                )
+            )
+            candidates.add(clamp(variable_unit_cost * 1.02, search_floor_price, ceiling_price))
         if target_price > firm.price:
             target_price = min(target_price, upward_ceiling)
         candidates.add(clamp(target_price, search_floor_price, ceiling_price))
