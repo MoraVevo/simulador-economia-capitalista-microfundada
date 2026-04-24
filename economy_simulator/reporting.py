@@ -816,6 +816,36 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "worker_dismissals": pd.Series([0] * len(audit), index=audit.index),
         "exited_workers_reemployed": pd.Series([0] * len(audit), index=audit.index),
         "payroll_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "severance_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "effective_marginal_unit_cost": audit.get(
+            "unit_cost",
+            pd.Series([0.0] * len(audit), index=audit.index),
+        ),
+        "cash": pd.Series([0.0] * len(audit), index=audit.index),
+        "capital": pd.Series([0.0] * len(audit), index=audit.index),
+        "technology": pd.Series([0.0] * len(audit), index=audit.index),
+        "capital_efficiency_percent": pd.Series([0.0] * len(audit), index=audit.index),
+        "technology_level_percent": pd.Series([0.0] * len(audit), index=audit.index),
+        "effective_worker_productivity_capacity": audit.get(
+            "productivity",
+            pd.Series([0.0] * len(audit), index=audit.index),
+        ),
+        "production": pd.Series([0.0] * len(audit), index=audit.index),
+        "installed_production_capacity_units": pd.Series([0.0] * len(audit), index=audit.index),
+        "capacity_utilization_rate": pd.Series([0.0] * len(audit), index=audit.index),
+        "stockout_rejected_units": pd.Series([0.0] * len(audit), index=audit.index),
+        "observed_demand_units": audit.get(
+            "sales",
+            pd.Series([0.0] * len(audit), index=audit.index),
+        ),
+        "stockout_pressure": pd.Series([0.0] * len(audit), index=audit.index),
+        "capital_investment": pd.Series([0.0] * len(audit), index=audit.index),
+        "technology_investment": pd.Series([0.0] * len(audit), index=audit.index),
+        "industrial_investment_spending": pd.Series([0.0] * len(audit), index=audit.index),
+        "investment_goods_units": pd.Series([0.0] * len(audit), index=audit.index),
+        "unfilled_investment_budget": pd.Series([0.0] * len(audit), index=audit.index),
+        "investment_decision_reason": pd.Series(["sin_decision_registrada"] * len(audit), index=audit.index),
+        "investment_animal_spirits": pd.Series([1.0] * len(audit), index=audit.index),
     }
     for column, default_values in defaults.items():
         if column not in audit.columns:
@@ -834,6 +864,48 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
     audit["firm_income_total"] = audit["revenue"]
     audit["firm_profit_total"] = audit["profit"]
     audit["desired_workers_next_period"] = audit["desired_workers"]
+    audit["price_minus_marginal_unit_cost"] = audit["price"] - audit["effective_marginal_unit_cost"]
+    audit["price_to_marginal_unit_cost_ratio"] = audit["price"] / audit["effective_marginal_unit_cost"].clip(lower=0.1)
+    audit["sales_realization_ratio"] = audit["sales"] / audit["expected_sales"].clip(lower=1.0)
+    revenue_base = audit["revenue"].clip(lower=1.0)
+    liquidity_base = (audit["cash"].clip(lower=0.0) + audit["industrial_investment_spending"]).clip(lower=1.0)
+    audit["productivity_investment_propensity"] = audit["technology_investment"] / revenue_base
+    audit["total_investment_propensity"] = audit["industrial_investment_spending"] / revenue_base
+    audit["liquidity_reinvestment_rate"] = audit["industrial_investment_spending"] / liquidity_base
+
+    def diagnose_loss(row) -> str:
+        if row["firm_profit_total"] >= 0.0:
+            return "sin_perdida"
+        marginal_cost = max(0.1, row["effective_marginal_unit_cost"])
+        price = max(0.0, row["price"])
+        sales_realization = max(0.0, row["sales_realization_ratio"])
+        if row["sales"] <= 0.0 and row["firm_income_total"] <= 0.0:
+            return "perdida_por_sin_ventas"
+        if price < marginal_cost * 0.98:
+            return "perdida_probable_por_precio_bajo_vs_costo_marginal"
+        if sales_realization < 0.70 and price >= marginal_cost * 0.98:
+            return "perdida_probable_por_precio_alto_o_demanda_debil"
+        if row["sales"] >= row["expected_sales"] * 0.85 and row["total_cost"] > row["firm_income_total"]:
+            return "perdida_probable_por_costos_fijos_nomina_o_escala"
+        if row["inventory"] > max(1.0, row["expected_sales"]) and row["sales"] < row["expected_sales"] * 0.85:
+            return "perdida_probable_por_exceso_inventario_demanda_insuficiente"
+        return "perdida_indeterminada_revisar_costos_demanda"
+
+    def recommend_loss_action(cause: str) -> str:
+        if cause == "sin_perdida":
+            return "sin_accion_correctiva"
+        if cause == "perdida_probable_por_precio_bajo_vs_costo_marginal":
+            return "subir_precio_reducir_costo_o_liquidar_solo_si_inventario_conviene"
+        if cause in ("perdida_probable_por_precio_alto_o_demanda_debil", "perdida_por_sin_ventas"):
+            return "probar_precio_menor_si_aumenta_utilidad_esperada"
+        if cause == "perdida_probable_por_costos_fijos_nomina_o_escala":
+            return "ajustar_capacidad_nomina_capital_o_productividad"
+        if cause == "perdida_probable_por_exceso_inventario_demanda_insuficiente":
+            return "bajar_produccion_y_liquidar_inventario_solo_si_conviene"
+        return "revisar_costos_demanda_inventario_y_precio"
+
+    audit["probable_loss_cause"] = audit.apply(diagnose_loss, axis=1)
+    audit["recommended_loss_response"] = audit["probable_loss_cause"].map(recommend_loss_action)
     ordered_columns = [
         "period",
         "year",
@@ -841,11 +913,44 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "firm_id",
         "sector",
         "starting_workers",
+        "workers",
+        "vacancies",
+        "vacancy_duration",
         "expected_sales",
         "sales",
+        "production",
         "inventory",
         "price",
+        "capital",
+        "capital_efficiency_percent",
+        "technology",
+        "technology_level_percent",
+        "investment_animal_spirits",
+        "productivity_investment_propensity",
+        "total_investment_propensity",
+        "liquidity_reinvestment_rate",
+        "capital_investment",
+        "technology_investment",
+        "technology_gain",
+        "industrial_investment_spending",
+        "investment_goods_units",
+        "unfilled_investment_budget",
+        "investment_decision_reason",
+        "productivity",
+        "effective_worker_productivity_capacity",
+        "installed_production_capacity_units",
+        "capacity_utilization_rate",
+        "stockout_rejected_units",
+        "observed_demand_units",
+        "stockout_pressure",
+        "effective_marginal_unit_cost",
+        "price_minus_marginal_unit_cost",
+        "price_to_marginal_unit_cost_ratio",
+        "sales_realization_ratio",
+        "probable_loss_cause",
+        "recommended_loss_response",
         "payroll_total",
+        "severance_total",
         "total_cost",
         "firm_income_total",
         "firm_profit_total",
@@ -886,7 +991,50 @@ def family_audit_frame(simulation) -> pd.DataFrame:
         if essential_offer_units > 0.0
         else (1.0 if necessary_essential_demand_units > 0.0 else 0.0)
     )
-    rows: list[dict[str, float | int]] = []
+    def family_basic_goods_coverage(members) -> tuple[float, float]:
+        needed_value = 0.0
+        covered_value = 0.0
+        for member in members:
+            for sector_key in ("food", "housing", "clothing"):
+                desired_units = max(0.0, simulation._household_sector_desired_units(member, sector_key))
+                bought_units = max(0.0, member.last_consumption.get(sector_key, 0.0))
+                price = max(0.0, sector_prices[sector_key])
+                needed_value += desired_units * price
+                covered_value += min(desired_units, bought_units) * price
+        coverage_ratio = covered_value / max(1e-9, needed_value) if needed_value > 0.0 else 1.0
+        return min(1.0, max(0.0, coverage_ratio)), needed_value
+
+    def shortfall_reason(
+        *,
+        coverage_ratio: float,
+        needed_value: float,
+        family_cash_available: float,
+        family_voluntary_saved_cash: float,
+        family_involuntary_retained_cash: float,
+    ) -> str:
+        if needed_value <= 0.0:
+            return "sin_necesidad_basica_registrada"
+        if coverage_ratio >= 0.995:
+            return "cobertura_completa"
+        affordability_gap = family_cash_available < needed_value * 0.98
+        supply_gap = (
+            necessary_essential_demand_units > 0.0
+            and essential_offer_units < necessary_essential_demand_units * 0.98
+        )
+        if affordability_gap and supply_gap:
+            return "no_alcanzo_y_no_habia_oferta_suficiente"
+        if supply_gap:
+            return "no_habia_inventario_u_oferta_suficiente"
+        if affordability_gap:
+            return "no_alcanzo_el_efectivo_disponible"
+        shortfall_value = needed_value * max(0.0, 1.0 - coverage_ratio)
+        if family_voluntary_saved_cash > shortfall_value * 0.25:
+            return "decidieron_ahorrar_o_no_comprar"
+        if family_involuntary_retained_cash > shortfall_value * 0.25:
+            return "retencion_involuntaria_no_gastada"
+        return "friccion_o_preferencia_no_comprar"
+
+    rows: list[dict[str, float | int | str]] = []
     for family_id, members in groups.items():
         alive_members = [member for member in members if member.alive]
         if not alive_members:
@@ -902,25 +1050,66 @@ def family_audit_frame(simulation) -> pd.DataFrame:
         employed_members = sum(1 for member in labor_capable_members if member.employed_by is not None)
 
         essential_basket_cost = sum(simulation._essential_budget(member) for member in alive_members)
-        private_school_basket_cost = 0.0
-        for member in alive_members:
-            school_target_units = simulation._household_sector_desired_units(member, "school")
-            public_school_units = (
-                simulation._public_education_target_units(member, "school", school_target_units)
-                if simulation.config.government_enabled
-                else 0.0
-            )
-            private_school_units = max(0.0, school_target_units - public_school_units)
-            private_school_basket_cost += private_school_units * sector_prices["school"]
+        school_target_units = sum(
+            simulation._household_sector_desired_units(member, "school")
+            for member in alive_members
+        )
+        public_school_units = max(
+            0.0,
+            getattr(simulation, "_period_family_public_education_units", {}).get((family_id, "school"), 0.0),
+        )
+        private_school_units = max(0.0, school_target_units - public_school_units)
+        private_school_basket_cost = private_school_units * sector_prices["school"]
 
         family_income_total = sum(max(0.0, member.last_income) for member in alive_members)
         family_cash_available = max(0.0, simulation._period_family_cash_available.get(family_id, 0.0))
+        family_period_income_cash = max(
+            0.0,
+            simulation._period_family_period_income_cash.get(family_id, 0.0),
+        )
+        family_start_savings_cash = max(
+            0.0,
+            simulation._period_family_start_savings_cash.get(family_id, 0.0),
+        )
         family_saved_cash = max(0.0, simulation._period_family_cash_saved.get(family_id, 0.0))
         family_spent_cash = max(0.0, simulation._period_family_cash_spent.get(family_id, 0.0))
+        family_income_spent_cash = max(
+            0.0,
+            simulation._period_family_income_spent_cash.get(family_id, 0.0),
+        )
+        family_savings_spent_cash = max(
+            0.0,
+            simulation._period_family_savings_spent_cash.get(family_id, 0.0),
+        )
+        family_period_net_saving_cash = simulation._period_family_net_saving_cash.get(
+            family_id,
+            family_saved_cash - family_start_savings_cash,
+        )
         family_voluntary_saved_cash = max(0.0, simulation._period_family_voluntary_saved_cash.get(family_id, 0.0))
         family_involuntary_retained_cash = max(
             0.0,
             simulation._period_family_involuntary_retained_cash.get(family_id, 0.0),
+        )
+        family_expected_salary = (
+            sum(max(0.0, member.reservation_wage) for member in labor_capable_members)
+            / max(1, len(labor_capable_members))
+            if labor_capable_members
+            else 0.0
+        )
+        accepted_members = [member for member in labor_capable_members if member.employed_by is not None]
+        family_accepted_salary = (
+            sum(max(0.0, member.contract_wage) for member in accepted_members)
+            / max(1, len(accepted_members))
+            if accepted_members
+            else 0.0
+        )
+        basic_goods_coverage_ratio, basic_goods_needed_value = family_basic_goods_coverage(alive_members)
+        basic_goods_shortfall_reason = shortfall_reason(
+            coverage_ratio=basic_goods_coverage_ratio,
+            needed_value=basic_goods_needed_value,
+            family_cash_available=family_cash_available,
+            family_voluntary_saved_cash=family_voluntary_saved_cash,
+            family_involuntary_retained_cash=family_involuntary_retained_cash,
         )
         if family_cash_available > 0.0:
             propensity_to_save = min(1.0, max(0.0, family_saved_cash / family_cash_available))
@@ -944,9 +1133,18 @@ def family_audit_frame(simulation) -> pd.DataFrame:
                 "total_family_income": family_income_total,
                 "family_employment_rate": employed_members / max(1, len(labor_capable_members)),
                 "family_cash_available": family_cash_available,
+                "family_period_income_cash": family_period_income_cash,
+                "family_start_savings_cash": family_start_savings_cash,
                 "family_cash_spent": family_spent_cash,
+                "family_income_spent_cash": family_income_spent_cash,
+                "family_savings_spent_cash": family_savings_spent_cash,
+                "family_period_net_saving_cash": family_period_net_saving_cash,
                 "family_voluntary_saved_cash": family_voluntary_saved_cash,
                 "family_involuntary_retained_cash": family_involuntary_retained_cash,
+                "family_expected_salary": family_expected_salary,
+                "family_accepted_salary": family_accepted_salary,
+                "basic_goods_coverage_percent": 100.0 * basic_goods_coverage_ratio,
+                "basic_goods_shortfall_reason": basic_goods_shortfall_reason,
                 "marginal_propensity_to_spend": propensity_to_spend,
                 "marginal_propensity_to_save": propensity_to_save,
                 "necessary_essential_demand_units": necessary_essential_demand_units,

@@ -86,12 +86,18 @@ def _run_scenario(
             simulation.step()
             if log_every > 0 and (month == 1 or month % max(1, log_every) == 0 or month == months):
                 latest = simulation.history[-1]
+                previous = simulation.history[-2] if len(simulation.history) > 1 else None
+                inflation_rate = (
+                    (latest.gdp_deflator / previous.gdp_deflator) - 1.0
+                    if previous is not None and previous.gdp_deflator > 0.0
+                    else 0.0
+                )
                 elapsed = perf_counter() - started
                 print(
                     (
                         f"[{label}] periodo {month}/{months} "
                         f"poblacion={latest.population} desempleo={latest.unemployment_rate:.1%} "
-                        f"pib={latest.gdp_nominal:,.0f} t={elapsed:.1f}s"
+                        f"inflacion={inflation_rate:.1%} pib={latest.gdp_nominal:,.0f} t={elapsed:.1f}s"
                     ),
                     file=sys.stderr,
                     flush=True,
@@ -117,12 +123,18 @@ def _run_scenario(
             simulation.step()
             if log_every > 0 and (month == 1 or month % max(1, log_every) == 0 or month == months):
                 latest = simulation.history[-1]
+                previous = simulation.history[-2] if len(simulation.history) > 1 else None
+                inflation_rate = (
+                    (latest.gdp_deflator / previous.gdp_deflator) - 1.0
+                    if previous is not None and previous.gdp_deflator > 0.0
+                    else 0.0
+                )
                 elapsed = perf_counter() - started
                 print(
                     (
                         f"[{label}] periodo {month}/{months} "
                         f"poblacion={latest.population} desempleo={latest.unemployment_rate:.1%} "
-                        f"pib={latest.gdp_nominal:,.0f} t={elapsed:.1f}s"
+                        f"inflacion={inflation_rate:.1%} pib={latest.gdp_nominal:,.0f} t={elapsed:.1f}s"
                     ),
                     file=sys.stderr,
                     flush=True,

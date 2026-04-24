@@ -65,6 +65,14 @@ def default_policy_values() -> dict[str, float | str]:
         "central_bank_goods_growth_pass_through": DEFAULT_POLICY_CONFIG.central_bank_goods_growth_pass_through,
         "central_bank_target_velocity": DEFAULT_POLICY_CONFIG.central_bank_target_velocity,
         "central_bank_target_annual_inflation": DEFAULT_POLICY_CONFIG.central_bank_target_annual_inflation,
+        "central_bank_inflation_gap_liquidity_weight": (
+            DEFAULT_POLICY_CONFIG.central_bank_inflation_gap_liquidity_weight
+        ),
+        "central_bank_unemployment_gap_liquidity_weight": (
+            DEFAULT_POLICY_CONFIG.central_bank_unemployment_gap_liquidity_weight
+        ),
+        "central_bank_demand_gap_liquidity_weight": DEFAULT_POLICY_CONFIG.central_bank_demand_gap_liquidity_weight,
+        "central_bank_credit_accommodation_share": DEFAULT_POLICY_CONFIG.central_bank_credit_accommodation_share,
         "central_bank_policy_rate_base": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_base,
         "central_bank_policy_rate_floor": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_floor,
         "central_bank_policy_rate_ceiling": DEFAULT_POLICY_CONFIG.central_bank_policy_rate_ceiling,

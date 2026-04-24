@@ -11,6 +11,8 @@ import pandas as pd
 
 from economy_simulator.batch_reports import (
     _annualize_core_history,
+    _rename_firm_audit_export,
+    _rename_family_audit_export,
     _sample_audit_entities,
     _scenario_sample_seed,
     _summary_tables,
@@ -31,6 +33,98 @@ def _initial_liquid_money(sim: EconomySimulation) -> float:
 
 
 class MoneyFlowTests(unittest.TestCase):
+    def test_break_even_price_for_sales_does_not_add_markup(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=40, firms_per_sector=1, seed=117)
+        )
+
+        self.assertAlmostEqual(sim._break_even_price_for_sales(4.0, 20.0, 10.0), 6.0)
+
+    def test_marginal_price_cut_rejects_cut_when_marginal_revenue_is_below_cost(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=40, firms_per_sector=1, seed=118)
+        )
+
+        self.assertFalse(
+            sim._marginal_price_cut_is_viable(
+                effective_price=8.0,
+                prudent_sales=120.0,
+                reference_price=10.0,
+                reference_prudent_sales=100.0,
+                marginal_unit_cost=1.0,
+            )
+        )
+        self.assertTrue(
+            sim._marginal_price_cut_is_viable(
+                effective_price=9.9,
+                prudent_sales=110.0,
+                reference_price=10.0,
+                reference_prudent_sales=100.0,
+                marginal_unit_cost=1.0,
+            )
+        )
+
+    def test_liquidation_sale_requires_avoided_inventory_loss_to_cover_discount_loss(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=40, firms_per_sector=1, seed=119)
+        )
+        firm = next(firm for firm in sim.firms if not sim._is_education_sector(firm.sector))
+        firm.target_inventory = 1.0
+        firm.last_unit_cost = 10.0
+        firm.inventory_batches = [10.0] * (sim._firm_inventory_shelf_life_periods() + 2)
+        firm.inventory = sum(firm.inventory_batches)
+
+        self.assertTrue(
+            sim._liquidation_sale_is_prudent(
+                firm,
+                effective_price=9.9,
+                break_even_price=10.0,
+                prudent_sales=5.0,
+            )
+        )
+        self.assertFalse(
+            sim._liquidation_sale_is_prudent(
+                firm,
+                effective_price=1.0,
+                break_even_price=100.0,
+                prudent_sales=5.0,
+            )
+        )
+
+    def test_loss_response_thresholds_are_heterogeneous_by_firm_behavior(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=40, firms_per_sector=1, seed=120)
+        )
+        patient_firm = sim.firms[0]
+        reactive_firm = sim.firms[1]
+        for firm in (patient_firm, reactive_firm):
+            firm.cash = 100.0
+            firm.capital = 100.0
+            firm.inventory = 10.0
+
+        patient_firm.volume_preference = 1.6
+        patient_firm.market_share_ambition = 1.6
+        patient_firm.price_aggressiveness = 1.4
+        patient_firm.cash_conservatism = 0.7
+        patient_firm.forecast_caution = 0.7
+        patient_firm.inventory_aversion = 0.8
+
+        reactive_firm.volume_preference = 0.7
+        reactive_firm.market_share_ambition = 0.7
+        reactive_firm.price_aggressiveness = 0.8
+        reactive_firm.cash_conservatism = 1.6
+        reactive_firm.forecast_caution = 1.5
+        reactive_firm.inventory_aversion = 1.4
+
+        self.assertGreater(
+            sim._firm_unit_margin_loss_response_threshold(patient_firm),
+            sim._firm_unit_margin_loss_response_threshold(reactive_firm),
+        )
+        self.assertGreater(
+            sim._firm_adaptation_threshold(patient_firm),
+            sim._firm_adaptation_threshold(reactive_firm),
+        )
+
     def test_policy_presets_include_all_country_profiles(self) -> None:
         presets = scenario_policy_presets()
 
@@ -43,6 +137,26 @@ class MoneyFlowTests(unittest.TestCase):
                 "Estado social intensivo (benchmark)",
             },
         )
+
+    def test_default_central_bank_uses_inflation_targeting_not_goods_growth(self) -> None:
+        config = SimulationConfig()
+
+        self.assertEqual(config.central_bank_rule, "inflation_targeting")
+
+    def test_inflation_targeting_liquidity_target_expands_when_below_target(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=80,
+                firms_per_sector=1,
+                seed=131,
+                central_bank_rule="inflation_targeting",
+                central_bank_target_annual_inflation=0.06,
+            )
+        )
+        current_money = sim._current_total_liquid_money()
+
+        self.assertGreater(sim._target_money_supply_inflation_targeting(), current_money)
 
     def test_batch_report_summary_uses_last_three_year_averages(self) -> None:
         annual = pd.DataFrame(
@@ -394,6 +508,71 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertGreater(target_headcount, len(firm.workers))
         self.assertLess(target_headcount, raw_target)
 
+    def test_target_headcount_does_not_mass_layoff_after_one_price_bad_month(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=3, seed=32)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        successful_peer = next(
+            peer for peer in sim.firms if peer.active and peer.sector == firm.sector and peer.id != firm.id
+        )
+        firm.workers = list(range(91))
+        firm.age = 2
+        firm.price = 11.31
+        firm.last_unit_cost = 4.0
+        firm.inventory = 180.0
+        firm.target_inventory = 70.0
+        firm.last_sales = 0.0
+        firm.last_expected_sales = 120.0
+        firm.sales_history = [122.0, 118.0, 0.0]
+        firm.expected_sales_history = [120.0, 120.0, 120.0]
+        firm.last_profit = -400.0
+        firm.cash = 9000.0
+        firm.last_wage_bill = 910.0
+        firm.loss_streak = 1
+        successful_peer.price = 4.54
+        successful_peer.last_sales = 130.0
+        successful_peer.last_expected_sales = 120.0
+        successful_peer.sales_history = [125.0, 128.0, 130.0]
+        successful_peer.expected_sales_history = [120.0, 120.0, 120.0]
+
+        target_headcount = sim._target_headcount_for_expected_sales(
+            firm,
+            expected_sales=7.82,
+            effective_productivity=3.0,
+            target_inventory=12.0,
+        )
+
+        self.assertGreaterEqual(target_headcount, 86)
+        self.assertLess(target_headcount, len(firm.workers))
+
+    def test_startup_essential_price_candidates_include_visible_success_cut(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=3, seed=33)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        successful_peer = next(
+            peer for peer in sim.firms if peer.active and peer.sector == firm.sector and peer.id != firm.id
+        )
+        firm.price = 11.31
+        firm.last_unit_cost = 4.0
+        firm.inventory = 160.0
+        firm.target_inventory = 70.0
+        firm.last_sales = 0.0
+        firm.last_expected_sales = 120.0
+        firm.sales_history = [120.0, 0.0]
+        firm.expected_sales_history = [120.0, 120.0]
+        successful_peer.price = 4.54
+        successful_peer.last_sales = 130.0
+        successful_peer.last_expected_sales = 120.0
+        successful_peer.sales_history = [126.0, 130.0]
+        successful_peer.expected_sales_history = [120.0, 120.0]
+
+        candidates = sim._startup_essential_candidate_prices(firm, variable_unit_cost=3.20)
+
+        self.assertLess(min(candidates), firm.price)
+        self.assertLessEqual(min(candidates), successful_peer.price * 1.05)
+
     def test_smoothed_sales_reference_uses_six_month_moving_average(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=60, firms_per_sector=2, seed=31, periods_per_year=12)
@@ -678,6 +857,54 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertGreater(priority_score, neutral_score)
 
+    def test_households_buy_private_school_when_public_slots_are_unavailable(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=80,
+                firms_per_sector=1,
+                seed=125,
+                government_enabled=True,
+                public_school_budget_share=0.0,
+                public_school_min_target_units=1.0,
+                public_school_support_package_share=1.0,
+            )
+        )
+        student = sim.households[0]
+        for household in sim.households:
+            household.alive = False
+            household.savings = 0.0
+            household.wage_income = 0.0
+            household.last_income = 0.0
+        student.alive = True
+        student.age_periods = int(10 * sim.config.periods_per_year)
+        student.school_years_completed = 0.0
+        student.savings = 50.0
+        student.guardian_id = None
+        student.mother_id = None
+        student.father_id = None
+
+        for firm in sim.firms:
+            firm.active = False
+            firm.workers.clear()
+            firm.inventory = 0.0
+            firm.inventory_batches.clear()
+        for sector_key in (*ESSENTIAL_SECTOR_KEYS, "school"):
+            firm = next(firm for firm in sim.firms if firm.sector == sector_key)
+            firm.active = True
+            firm.price = 1.0
+            firm.inventory = 25.0
+            firm.inventory_batches = [] if sector_key == "school" else [25.0]
+
+        sim.period = 1
+        sim._reset_period_counters()
+        sim._refresh_period_household_caches()
+        sim._refresh_period_sector_caches()
+        sim._consume_households()
+
+        self.assertGreater(student.last_consumption["school"], 0.0)
+        self.assertEqual(sim._period_family_public_education_units.get((student.id, "school"), 0.0), 0.0)
+
     def test_public_administration_hires_unemployed_households(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(
@@ -764,6 +991,82 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertEqual(source_snapshot.worker_dismissals, 0)
         self.assertEqual(source_snapshot.exited_workers_reemployed, 1)
 
+    def test_private_dismissal_pays_tenure_based_severance(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=158)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.workers)
+        worker = sim.households[firm.workers[0]]
+        worker.contract_wage = 10.0
+        worker.employment_tenure = 12
+        firm.cash = 100.0
+        firm.age = 1
+
+        sim._reset_period_counters()
+        sim._release_household_from_employment(worker)
+        snapshot = next(snapshot for snapshot in sim._build_firm_period_snapshots() if snapshot.firm_id == firm.id)
+
+        self.assertAlmostEqual(firm.cash, 90.0)
+        self.assertAlmostEqual(worker.wage_income, 10.0)
+        self.assertAlmostEqual(worker.last_income, 10.0)
+        self.assertAlmostEqual(firm.last_severance_cost, 10.0)
+        self.assertAlmostEqual(snapshot.severance_total, 10.0)
+        self.assertEqual(snapshot.worker_dismissals, 1)
+
+    def test_private_quit_does_not_pay_severance(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=159)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.workers)
+        worker = sim.households[firm.workers[0]]
+        worker.contract_wage = 10.0
+        worker.employment_tenure = 12
+        firm.cash = 100.0
+
+        sim._reset_period_counters()
+        sim._release_household_from_employment(worker, exit_reason="quit")
+
+        self.assertAlmostEqual(firm.cash, 100.0)
+        self.assertAlmostEqual(worker.wage_income, 0.0)
+        self.assertAlmostEqual(firm.last_severance_cost, 0.0)
+
+    def test_workforce_alignment_releases_low_severance_worker_first(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=140,
+                firms_per_sector=2,
+                seed=160,
+                government_payroll_tax_rate=0.0,
+                severance_layoff_payback_periods=1,
+            )
+        )
+        firm = next(firm for firm in sim.firms if firm.active)
+        for worker_id in list(firm.workers):
+            sim._release_household_from_employment(sim.households[worker_id], exit_reason="quit")
+        candidates = [
+            household
+            for household in sim.households
+            if household.alive and sim._household_labor_capacity(household) > 0.0
+        ][:2]
+        for household in candidates:
+            sim._release_household_from_employment(household, exit_reason="quit")
+            sim._assign_household_to_employer(household, firm.id, 10.0)
+        low_tenure, high_tenure = candidates
+        low_tenure.employment_tenure = 1
+        high_tenure.employment_tenure = 120
+        firm.cash = 1000.0
+        firm.last_wage_bill = 20.0
+        firm.loss_streak = 0
+        firm.desired_workers = 1
+
+        sim._reset_period_counters()
+        sim._align_existing_workforce()
+
+        self.assertIsNone(low_tenure.employed_by)
+        self.assertEqual(high_tenure.employed_by, firm.id)
+        self.assertAlmostEqual(firm.last_severance_cost, 10.0 / 12.0)
+
     def test_firm_audit_frame_merges_macro_labor_context(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(
@@ -794,9 +1097,21 @@ class MoneyFlowTests(unittest.TestCase):
             "firm_income_total",
             "firm_profit_total",
             "payroll_total",
+            "severance_total",
             "desired_workers_next_period",
             "average_wage",
             "unemployment_rate",
+            "effective_marginal_unit_cost",
+            "price_minus_marginal_unit_cost",
+            "sales_realization_ratio",
+            "probable_loss_cause",
+            "recommended_loss_response",
+            "capital",
+            "capital_efficiency_percent",
+            "technology",
+            "technology_level_percent",
+            "productivity",
+            "effective_worker_productivity_capacity",
         ):
             self.assertIn(column, audit.columns)
         merged = audit.merge(
@@ -807,6 +1122,114 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertTrue((merged["firm_income_total"] == merged["revenue"]).all())
         self.assertTrue((merged["desired_workers_next_period"] == merged["desired_workers"]).all())
 
+    def test_firm_audit_frame_classifies_probable_loss_cause_for_xlsx(self) -> None:
+        firms = pd.DataFrame(
+            [
+                {
+                    "period": 1,
+                    "year": 1,
+                    "period_in_year": 1,
+                    "firm_id": 1,
+                    "sector": "food",
+                    "workers": 2,
+                    "desired_workers": 2,
+                    "expected_sales": 100.0,
+                    "sales": 100.0,
+                    "production": 120.0,
+                    "inventory": 10.0,
+                    "price": 5.0,
+                    "capital": 100.0,
+                    "capital_efficiency_percent": 80.0,
+                    "technology": 1.2,
+                    "technology_level_percent": 12.0,
+                    "investment_animal_spirits": 1.15,
+                    "technology_investment": 20.0,
+                    "industrial_investment_spending": 80.0,
+                    "productivity": 3.0,
+                    "effective_worker_productivity_capacity": 2.9,
+                    "effective_marginal_unit_cost": 6.0,
+                    "revenue": 500.0,
+                    "profit": -50.0,
+                    "total_cost": 550.0,
+                },
+                {
+                    "period": 1,
+                    "year": 1,
+                    "period_in_year": 1,
+                    "firm_id": 2,
+                    "sector": "food",
+                    "workers": 2,
+                    "desired_workers": 2,
+                    "expected_sales": 100.0,
+                    "sales": 20.0,
+                    "production": 80.0,
+                    "inventory": 10.0,
+                    "price": 9.0,
+                    "capital": 100.0,
+                    "capital_efficiency_percent": 80.0,
+                    "technology": 1.2,
+                    "technology_level_percent": 12.0,
+                    "investment_animal_spirits": 0.95,
+                    "technology_investment": 0.0,
+                    "industrial_investment_spending": 0.0,
+                    "productivity": 3.0,
+                    "effective_worker_productivity_capacity": 2.9,
+                    "effective_marginal_unit_cost": 6.0,
+                    "revenue": 180.0,
+                    "profit": -40.0,
+                    "total_cost": 220.0,
+                },
+                {
+                    "period": 1,
+                    "year": 1,
+                    "period_in_year": 1,
+                    "firm_id": 3,
+                    "sector": "food",
+                    "workers": 2,
+                    "desired_workers": 2,
+                    "expected_sales": 100.0,
+                    "sales": 100.0,
+                    "production": 110.0,
+                    "inventory": 10.0,
+                    "price": 9.0,
+                    "capital": 100.0,
+                    "capital_efficiency_percent": 80.0,
+                    "technology": 1.2,
+                    "technology_level_percent": 12.0,
+                    "investment_animal_spirits": 1.05,
+                    "technology_investment": 40.0,
+                    "industrial_investment_spending": 120.0,
+                    "productivity": 3.0,
+                    "effective_worker_productivity_capacity": 2.9,
+                    "effective_marginal_unit_cost": 6.0,
+                    "revenue": 900.0,
+                    "profit": 100.0,
+                    "total_cost": 800.0,
+                },
+            ]
+        )
+        macro = pd.DataFrame({"period": [1], "average_wage": [10.0], "unemployment_rate": [0.05]})
+
+        audit = firm_audit_frame(firms, macro)
+        causes = dict(zip(audit["firm_id"], audit["probable_loss_cause"]))
+        exported = _rename_firm_audit_export(audit)
+
+        self.assertEqual(causes[1], "perdida_probable_por_precio_bajo_vs_costo_marginal")
+        self.assertEqual(causes[2], "perdida_probable_por_precio_alto_o_demanda_debil")
+        self.assertEqual(causes[3], "sin_perdida")
+        self.assertIn("Causa probable de perdida", exported.columns)
+        self.assertIn("Respuesta sugerida ante perdida", exported.columns)
+        self.assertIn("Produccion realizada", exported.columns)
+        self.assertIn("Propension interna a invertir", exported.columns)
+        self.assertIn("Propension invertir productividad / ingresos", exported.columns)
+        self.assertIn("Propension inversion total / ingresos", exported.columns)
+        self.assertIn("Reinversion sobre liquidez disponible", exported.columns)
+        self.assertIn("Razon decision inversion maquinaria", exported.columns)
+        self.assertIn("Productividad efectiva por trabajador", exported.columns)
+        self.assertIn("Capacidad instalada de produccion", exported.columns)
+        self.assertIn("Utilizacion de capacidad %", exported.columns)
+        self.assertIn("Tecnologia sobre maximo %", exported.columns)
+
     def test_family_audit_frame_reports_worker_side_metrics(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=120, firms_per_sector=2, seed=60)
@@ -814,6 +1237,7 @@ class MoneyFlowTests(unittest.TestCase):
 
         sim.step()
         audit = family_audit_frame(sim)
+        exported = _rename_family_audit_export(audit)
 
         self.assertFalse(audit.empty)
         for column in (
@@ -825,6 +1249,10 @@ class MoneyFlowTests(unittest.TestCase):
             "family_cash_spent",
             "family_voluntary_saved_cash",
             "family_involuntary_retained_cash",
+            "family_expected_salary",
+            "family_accepted_salary",
+            "basic_goods_coverage_percent",
+            "basic_goods_shortfall_reason",
             "marginal_propensity_to_spend",
             "marginal_propensity_to_save",
             "necessary_essential_demand_units",
@@ -844,9 +1272,16 @@ class MoneyFlowTests(unittest.TestCase):
                 >= audit["family_voluntary_saved_cash"] + audit["family_involuntary_retained_cash"]
             ).all()
         )
+        self.assertTrue((audit["family_expected_salary"] >= 0.0).all())
+        self.assertTrue((audit["family_accepted_salary"] >= 0.0).all())
         self.assertTrue((audit["necessary_essential_demand_units"] >= 0.0).all())
         self.assertTrue((audit["essential_offer_units"] >= 0.0).all())
         self.assertTrue((audit["necessary_demand_to_offer_ratio"] >= 0.0).all())
+        self.assertTrue((audit["basic_goods_coverage_percent"] >= 0.0).all())
+        self.assertTrue((audit["basic_goods_coverage_percent"] <= 100.0).all())
+        self.assertTrue(audit["basic_goods_shortfall_reason"].notna().all())
+        self.assertIn("Expectativa salarial familia", exported.columns)
+        self.assertIn("Salario aceptado familia", exported.columns)
 
     def test_family_audit_frame_keeps_period_history_when_tracking_enabled(self) -> None:
         sim = EconomySimulation(
@@ -1954,6 +2389,61 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertGreater(hungry_probability, nonfood_probability)
 
+    def test_basic_basket_shortfall_mortality_prioritizes_vulnerable_members(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=140,
+                firms_per_sector=2,
+                seed=92,
+                period_base_death_probability=0.0,
+                period_senior_death_probability=0.0,
+            )
+        )
+        members = sim.households[:4]
+        self.assertEqual(len(members), 4)
+        baby, child, adult, senior = members
+        baby.age_periods = int(1.0 * sim.config.periods_per_year)
+        child.age_periods = int(8.0 * sim.config.periods_per_year)
+        adult.age_periods = int(35.0 * sim.config.periods_per_year)
+        senior.age_periods = int(76.0 * sim.config.periods_per_year)
+
+        for member in members:
+            member.health_fragility = 0.0
+            member.deprivation_streak = sim.config.starvation_death_periods
+            member.severe_hunger_streak = sim.config.starvation_death_periods
+
+        probabilities = {
+            "baby": sim._household_death_probability(
+                baby,
+                unemployment_rate=0.0,
+                average_savings=0.0,
+                family_resources_ratio=0.35,
+            ),
+            "child": sim._household_death_probability(
+                child,
+                unemployment_rate=0.0,
+                average_savings=0.0,
+                family_resources_ratio=0.35,
+            ),
+            "adult": sim._household_death_probability(
+                adult,
+                unemployment_rate=0.0,
+                average_savings=0.0,
+                family_resources_ratio=0.35,
+            ),
+            "senior": sim._household_death_probability(
+                senior,
+                unemployment_rate=0.0,
+                average_savings=0.0,
+                family_resources_ratio=0.35,
+            ),
+        }
+
+        self.assertGreater(probabilities["baby"], probabilities["child"])
+        self.assertGreater(probabilities["child"], probabilities["adult"])
+        self.assertGreater(probabilities["senior"], probabilities["adult"])
+
     def test_snapshot_exposes_food_condition_metrics(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=2, households=180, firms_per_sector=3, seed=95)
@@ -2125,26 +2615,23 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertAlmostEqual(student.last_consumption.get("university", 0.0), university_target, places=6)
         self.assertAlmostEqual(student.savings, 0.0, places=6)
 
-    def test_period_one_wages_respect_subsistence_anchor(self) -> None:
-        sim = EconomySimulation(
-            SimulationConfig(periods=1, households=400, firms_per_sector=4, seed=7)
-        )
-
-        sim.step()
-        living_wage_anchor = sim._living_wage_anchor()
-
-        self.assertGreater(living_wage_anchor, 0.0)
-        active_firms = [firm for firm in sim.firms if firm.active and firm.age > 0]
-        self.assertTrue(active_firms)
-        self.assertTrue(
-            all(
-                firm.wage_offer
-                >= living_wage_anchor
-                * (sim.config.reservation_wage_floor_share + sim._sector_wage_floor_premium(firm.sector))
-                - 1e-9
-                for firm in active_firms
+    def test_period_one_wages_do_not_depend_on_living_wage_anchor(self) -> None:
+        with patch.object(EconomySimulation, "_living_wage_anchor", return_value=1.0):
+            base_sim = EconomySimulation(
+                SimulationConfig(periods=1, households=400, firms_per_sector=4, seed=7)
             )
-        )
+        with patch.object(EconomySimulation, "_living_wage_anchor", return_value=1_000.0):
+            anchored_sim = EconomySimulation(
+                SimulationConfig(periods=1, households=400, firms_per_sector=4, seed=7)
+            )
+
+        base_wages = [firm.wage_offer for firm in base_sim.firms if firm.active and firm.age >= 0]
+        anchored_wages = [
+            firm.wage_offer for firm in anchored_sim.firms if firm.active and firm.age >= 0
+        ]
+        self.assertEqual(len(base_wages), len(anchored_wages))
+        for base_wage, anchored_wage in zip(base_wages, anchored_wages):
+            self.assertAlmostEqual(base_wage, anchored_wage, places=6)
 
     def test_update_firm_policies_can_reduce_wage_offer_toward_floor(self) -> None:
         sim = EconomySimulation(
@@ -2165,9 +2652,9 @@ class MoneyFlowTests(unittest.TestCase):
         firm.last_wage_bill = 400.0
         original_wage = firm.wage_offer
 
-        with patch.object(sim, "_living_wage_anchor", return_value=8.0), patch.object(
-            sim, "_baseline_demand", return_value=5.0
-        ), patch.object(sim, "_firm_effective_productivity", return_value=10.0), patch.object(
+        with patch.object(sim, "_baseline_demand", return_value=5.0), patch.object(
+            sim, "_firm_effective_productivity", return_value=10.0
+        ), patch.object(
             sim, "_firm_learning_maturity", return_value=1.0
         ), patch.object(sim, "_sales_anchor", return_value=5.0), patch.object(
             sim, "_sector_wage_pressure_bonus", return_value=0.0
@@ -2180,11 +2667,8 @@ class MoneyFlowTests(unittest.TestCase):
         ), patch.object(sim, "_candidate_price_objective", return_value=0.0):
             sim._update_firm_policies(last_unemployment=0.20)
 
-        sector_floor = 8.0 * (
-            sim.config.reservation_wage_floor_share + sim._sector_wage_floor_premium(firm.sector)
-        )
         self.assertLess(firm.wage_offer, original_wage)
-        self.assertGreaterEqual(firm.wage_offer, sector_floor - 1e-9)
+        self.assertGreaterEqual(firm.wage_offer, 0.01)
 
     def test_update_firm_policies_raises_wage_for_profitable_rejection_signal(self) -> None:
         base_sim = EconomySimulation(
@@ -2221,8 +2705,6 @@ class MoneyFlowTests(unittest.TestCase):
         base_firm.last_labor_offer_rejection_wage_floor = 0.0
 
         patchers = (
-            patch.object(base_sim, "_living_wage_anchor", return_value=8.0),
-            patch.object(rejection_sim, "_living_wage_anchor", return_value=8.0),
             patch.object(base_sim, "_baseline_demand", return_value=30.0),
             patch.object(rejection_sim, "_baseline_demand", return_value=30.0),
             patch.object(base_sim, "_firm_effective_productivity", return_value=5.0),
@@ -2292,8 +2774,6 @@ class MoneyFlowTests(unittest.TestCase):
         base_firm.last_labor_offer_rejection_wage_floor = 0.0
 
         patchers = (
-            patch.object(base_sim, "_living_wage_anchor", return_value=8.0),
-            patch.object(rejection_sim, "_living_wage_anchor", return_value=8.0),
             patch.object(base_sim, "_baseline_demand", return_value=30.0),
             patch.object(rejection_sim, "_baseline_demand", return_value=30.0),
             patch.object(base_sim, "_firm_effective_productivity", return_value=5.0),
@@ -2352,11 +2832,7 @@ class MoneyFlowTests(unittest.TestCase):
             low_liquidity_sim,
             "_household_observed_income",
             return_value=60.0,
-        ), patch.object(low_liquidity_sim, "_household_cash_balance", return_value=20.0), patch.object(
-            low_liquidity_sim,
-            "_living_wage_anchor",
-            return_value=100.0,
-        ):
+        ), patch.object(low_liquidity_sim, "_household_cash_balance", return_value=20.0):
             low_liquidity_sim._update_household_reservation_wages()
 
         with patch.object(high_liquidity_sim, "_family_groups", return_value={0: [high_member]}), patch.object(
@@ -2367,14 +2843,143 @@ class MoneyFlowTests(unittest.TestCase):
             high_liquidity_sim,
             "_household_observed_income",
             return_value=60.0,
-        ), patch.object(high_liquidity_sim, "_household_cash_balance", return_value=450.0), patch.object(
-            high_liquidity_sim,
-            "_living_wage_anchor",
-            return_value=100.0,
-        ):
+        ), patch.object(high_liquidity_sim, "_household_cash_balance", return_value=450.0):
             high_liquidity_sim._update_household_reservation_wages()
 
         self.assertLess(low_member.reservation_wage, high_member.reservation_wage)
+
+    def test_long_unemployment_and_basic_basket_shortfall_reduce_reservation_wage(self) -> None:
+        config = SimulationConfig(periods=1, households=80, firms_per_sector=2, seed=154)
+        recent_sim = EconomySimulation(config)
+        long_sim = EconomySimulation(config)
+
+        def prepare_member(sim: EconomySimulation, unemployment_duration: int):
+            member = sim.households[0]
+            member.age_periods = int(30 * sim.config.periods_per_year)
+            member.reservation_wage = 100.0
+            member.money_trust = 0.5
+            member.employed_by = None
+            member.unemployment_duration = unemployment_duration
+            return member
+
+        recent_member = prepare_member(recent_sim, 0)
+        long_member = prepare_member(long_sim, 9)
+
+        for sim, member in ((recent_sim, recent_member), (long_sim, long_member)):
+            with patch.object(sim, "_family_groups", return_value={0: [member]}), patch.object(
+                sim,
+                "_household_labor_capacity",
+                return_value=1.0,
+            ), patch.object(sim, "_essential_budget", return_value=100.0), patch.object(
+                sim,
+                "_household_observed_income",
+                return_value=20.0,
+            ), patch.object(sim, "_household_cash_balance", return_value=40.0):
+                sim._update_household_reservation_wages()
+
+        self.assertLess(long_member.reservation_wage, recent_member.reservation_wage)
+
+    def test_reservation_wage_distress_response_is_heterogeneous(self) -> None:
+        config = SimulationConfig(periods=1, households=80, firms_per_sector=2, seed=155)
+        patient_sim = EconomySimulation(config)
+        desperate_sim = EconomySimulation(config)
+
+        def prepare_member(sim: EconomySimulation, sensitivity: float):
+            member = sim.households[0]
+            member.age_periods = int(30 * sim.config.periods_per_year)
+            member.reservation_wage = 100.0
+            member.money_trust = 0.5
+            member.consumption_impatience = 0.5
+            member.price_sensitivity = 1.0
+            member.saving_propensity = 0.1
+            member.job_change_aversion = 0.5
+            member.employed_by = None
+            member.unemployment_duration = 9
+            member.reservation_wage_distress_sensitivity = sensitivity
+            return member
+
+        patient_member = prepare_member(patient_sim, 0.45)
+        desperate_member = prepare_member(desperate_sim, 1.75)
+
+        for sim, member in ((patient_sim, patient_member), (desperate_sim, desperate_member)):
+            with patch.object(sim, "_family_groups", return_value={0: [member]}), patch.object(
+                sim,
+                "_household_labor_capacity",
+                return_value=1.0,
+            ), patch.object(sim, "_essential_budget", return_value=100.0), patch.object(
+                sim,
+                "_household_observed_income",
+                return_value=20.0,
+            ), patch.object(sim, "_household_cash_balance", return_value=40.0):
+                sim._update_household_reservation_wages()
+
+        self.assertLess(desperate_member.reservation_wage, patient_member.reservation_wage)
+
+    def test_minimum_acceptable_wage_is_lower_for_desperate_unemployed_workers(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=80, firms_per_sector=2, seed=156)
+        )
+        member = sim.households[0]
+        member.age_periods = int(30 * sim.config.periods_per_year)
+        member.reservation_wage = 100.0
+        member.money_trust = 0.5
+        member.consumption_impatience = 0.6
+        member.price_sensitivity = 1.0
+        member.saving_propensity = 0.1
+        member.job_change_aversion = 0.5
+        member.unemployment_duration = 8
+        member.employed_by = None
+
+        with patch.object(sim, "_family_groups", return_value={0: [member]}), patch.object(
+            sim,
+            "_household_labor_capacity",
+            return_value=1.0,
+        ), patch.object(sim, "_essential_budget", return_value=100.0), patch.object(
+            sim,
+            "_household_observed_income",
+            return_value=10.0,
+        ), patch.object(sim, "_household_cash_balance", return_value=5.0):
+            desperate_floor = sim._household_minimum_acceptable_wage(
+                member,
+                current_wage=0.0,
+                unemployment_rate=0.04,
+            )
+
+        with patch.object(sim, "_family_groups", return_value={0: [member]}), patch.object(
+            sim,
+            "_household_labor_capacity",
+            return_value=1.0,
+        ), patch.object(sim, "_essential_budget", return_value=100.0), patch.object(
+            sim,
+            "_household_observed_income",
+            return_value=10.0,
+        ), patch.object(sim, "_household_cash_balance", return_value=300.0):
+            cushioned_floor = sim._household_minimum_acceptable_wage(
+                member,
+                current_wage=0.0,
+                unemployment_rate=0.04,
+            )
+
+        self.assertLess(desperate_floor, cushioned_floor)
+
+        member.employed_by = 1
+        member.contract_wage = 12.0
+        with patch.object(sim, "_family_groups", return_value={0: [member]}), patch.object(
+            sim,
+            "_household_labor_capacity",
+            return_value=1.0,
+        ), patch.object(sim, "_essential_budget", return_value=100.0), patch.object(
+            sim,
+            "_household_observed_income",
+            return_value=10.0,
+        ), patch.object(sim, "_household_cash_balance", return_value=5.0):
+            employed_floor = sim._household_minimum_acceptable_wage(
+                member,
+                current_wage=12.0,
+                unemployment_rate=0.04,
+            )
+
+        self.assertGreater(employed_floor, desperate_floor)
 
     def test_startups_begin_with_positive_cash_buffer(self) -> None:
         sim = EconomySimulation(
@@ -2388,6 +2993,23 @@ class MoneyFlowTests(unittest.TestCase):
             self.assertGreater(
                 firm.cash + firm.capital,
                 firm.fixed_overhead,
+            )
+
+    def test_startups_begin_with_liquid_buffer_against_assets(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=43)
+        )
+
+        for firm in sim.firms:
+            if not firm.active or firm.sector == "public_administration":
+                continue
+            spec = SECTOR_BY_KEY[firm.sector]
+            productive_assets = firm.capital + firm.inventory * max(0.1, spec.base_price)
+            if productive_assets <= 0.0:
+                continue
+            self.assertGreaterEqual(
+                firm.cash,
+                productive_assets * sim.config.startup_liquid_asset_buffer_share,
             )
 
     def test_food_sector_keeps_at_least_one_free_input_firm(self) -> None:
@@ -2706,6 +3328,51 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertEqual(high_wage_firm.labor_offer_rejections, 1)
         self.assertEqual(low_wage_firm.labor_offer_rejections, 0)
         self.assertAlmostEqual(high_wage_firm.labor_offer_rejection_wage_floor, worker.reservation_wage)
+
+    def test_match_labor_negotiates_between_worker_expectation_and_firm_offer(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=120, firms_per_sector=1, seed=83)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        for other_firm in sim.firms:
+            if other_firm.id != firm.id:
+                other_firm.active = False
+                other_firm.workers = []
+
+        worker = next(
+            household
+            for household in sim.households
+            if sim.config.entry_age_years <= sim._household_age_years(household) < sim.config.senior_age_years
+        )
+        worker.employed_by = None
+        worker.reservation_wage = 8.0
+        worker.savings = 10.0
+        worker.unemployment_duration = 0
+        firm.desired_workers = 1
+        firm.workers = []
+        firm.wage_offer = 12.0
+        firm.price = 20.0
+        firm.input_cost_per_unit = 1.0
+        firm.transport_cost_per_unit = 1.0
+        firm.productivity = 1.0
+        firm.technology = 1.0
+        firm.cash = 500.0
+        firm.fixed_overhead = 5.0
+        firm.last_profit = 50.0
+        firm.last_revenue = 100.0
+
+        sim._eligible_households = lambda: [worker]  # type: ignore[method-assign]
+        with patch.object(sim, "_worker_effective_labor_for_sector", return_value=1.0), patch.object(
+            sim,
+            "_household_minimum_acceptable_wage",
+            return_value=8.0,
+        ):
+            sim._match_labor()
+
+        self.assertEqual(worker.employed_by, firm.id)
+        self.assertGreaterEqual(worker.contract_wage, 8.0)
+        self.assertLess(worker.contract_wage, firm.wage_offer)
+        self.assertAlmostEqual(worker.contract_wage, 10.0, delta=0.75)
 
     def test_snapshot_exposes_bank_balance_and_credit_creation_metrics(self) -> None:
         sim = EconomySimulation(
@@ -3438,6 +4105,224 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertLess(effective_supply, 150.0)
         self.assertLess(effective_supply, 0.10 * target_firm.last_expected_sales)
 
+    def test_sales_anchor_responds_to_observed_demand_without_stockouts(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=208)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        firm.last_sales = 40.0
+        firm.last_expected_sales = 40.0
+        firm.last_observed_demand = 40.0
+        firm.last_stockout_rejections = 0.0
+        firm.last_competitive_demand_rejections = 0.0
+        firm.last_capacity_shortage_rejections = 0.0
+        firm.sales_history = [40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        firm.expected_sales_history = [40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        firm.observed_demand_history = [40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+
+        base_anchor = sim._sales_anchor(firm, 800.0, market_share=0.25)
+
+        firm.last_observed_demand = 80.0
+        firm.observed_demand_history = [80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+        observed_anchor = sim._sales_anchor(firm, 800.0, market_share=0.25)
+
+        self.assertGreater(observed_anchor, base_anchor)
+        self.assertGreater(observed_anchor, firm.last_sales)
+
+    def test_sold_out_firm_reclassifies_missed_preferred_sales_as_stockout(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=218)
+        )
+        target_firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        for firm in sim.firms:
+            if firm.id != target_firm.id:
+                firm.active = False
+                firm.workers.clear()
+
+        target_firm.sales_this_period = 100.0
+        target_firm.stockout_rejections_this_period = 0.0
+        target_firm.competitive_demand_rejections_this_period = 80.0
+        target_firm.capacity_shortage_rejections_this_period = 0.0
+        target_firm.inventory = 0.0
+        target_firm.target_inventory = 20.0
+        target_firm.last_production = 100.0
+        target_firm.last_expected_sales = 90.0
+        target_firm.production_history = [100.0, 100.0, 100.0, 100.0]
+        target_firm.observed_demand_history = [100.0, 100.0, 100.0, 100.0]
+        target_firm.sales_history = [100.0, 100.0, 100.0, 100.0]
+        target_firm.expected_sales_history = [90.0, 90.0, 90.0, 90.0]
+        target_firm.cash = 800.0
+        target_firm.last_wage_bill = 80.0
+        target_firm.last_input_cost = 20.0
+        target_firm.last_transport_cost = 5.0
+        target_firm.last_fixed_overhead = 15.0
+        target_firm.last_capital_charge = 2.0
+        target_firm.last_severance_cost = 0.0
+        sim._cash_before_sales[target_firm.id] = 300.0
+
+        sim._settle_firms()
+
+        self.assertGreater(target_firm.last_stockout_rejections, 0.0)
+        self.assertGreater(target_firm.last_stockout_pressure, 0.0)
+        self.assertGreaterEqual(target_firm.last_observed_demand, target_firm.last_sales + target_firm.last_stockout_rejections)
+
+    def test_sold_out_pressure_raises_sales_anchor_and_capital_budget(self) -> None:
+        base_sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=219)
+        )
+        shortage_sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=219)
+        )
+        base_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == "food")
+        shortage_firm = next(firm for firm in shortage_sim.firms if firm.active and firm.sector == "food")
+
+        for firm in (base_firm, shortage_firm):
+            firm.inventory = 0.0
+            firm.target_inventory = 16.0
+            firm.last_sales = 80.0
+            firm.last_expected_sales = 80.0
+            firm.last_production = 80.0
+            firm.sales_history = [80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+            firm.expected_sales_history = [80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+            firm.production_history = [80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+            firm.cash = 900.0
+            firm.capital = 75.0
+            firm.price = 11.0
+            firm.last_revenue = 880.0
+            firm.last_profit = 90.0
+            firm.last_wage_bill = 120.0
+            firm.last_input_cost = 30.0
+            firm.last_transport_cost = 8.0
+            firm.last_fixed_overhead = 25.0
+            firm.last_interest_cost = 0.0
+            firm.market_share_ambition = 1.10
+
+        base_firm.last_observed_demand = 80.0
+        base_firm.observed_demand_history = [80.0, 80.0, 80.0, 80.0, 80.0, 80.0]
+        shortage_firm.last_observed_demand = 150.0
+        shortage_firm.last_competitive_demand_rejections = 70.0
+        shortage_firm.observed_demand_history = [150.0, 150.0, 150.0, 150.0, 150.0, 150.0]
+
+        base_anchor = base_sim._sales_anchor(base_firm, 900.0, market_share=0.25)
+        shortage_anchor = shortage_sim._sales_anchor(shortage_firm, 900.0, market_share=0.25)
+        base_budget = base_sim._firm_desired_capital_goods_budget(base_firm)
+        shortage_budget = shortage_sim._firm_desired_capital_goods_budget(shortage_firm)
+
+        self.assertGreater(shortage_anchor, base_anchor)
+        self.assertGreater(shortage_budget, base_budget)
+
+    def test_sold_out_firm_expected_sales_cannot_collapse_below_revealed_sales(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=221)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        firm.inventory = 0.0
+        firm.target_inventory = 20.0
+        firm.last_sales = 80.0
+        firm.last_expected_sales = 0.0
+        firm.last_production = 80.0
+        firm.sales_history = [80.0, 80.0, 80.0, 80.0]
+        firm.expected_sales_history = [0.0, 0.0, 0.0, 0.0]
+        firm.production_history = [80.0, 80.0, 80.0, 80.0]
+        firm.observed_demand_history = [80.0, 80.0, 80.0, 80.0]
+
+        adjusted_expected_sales = sim._firm_revealed_expected_sales_floor(firm, 0.0)
+
+        self.assertGreater(adjusted_expected_sales, firm.last_sales)
+
+    def test_manufacturing_sellout_gets_stronger_expected_sales_floor(self) -> None:
+        base_sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=222)
+        )
+        food_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == "food")
+        manufactured_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == "manufactured")
+
+        for firm in (food_firm, manufactured_firm):
+            firm.inventory = 0.0
+            firm.target_inventory = 20.0
+            firm.last_sales = 1.0
+            firm.last_expected_sales = 0.0
+            firm.last_production = 1.0
+            firm.sales_history = [1.0, 1.0, 1.0, 1.0]
+            firm.expected_sales_history = [0.0, 0.0, 0.0, 0.0]
+            firm.production_history = [1.0, 1.0, 1.0, 1.0]
+            firm.observed_demand_history = [1.0, 1.0, 1.0, 1.0]
+
+        food_floor = base_sim._firm_revealed_expected_sales_floor(food_firm, 0.0)
+        manufactured_floor = base_sim._firm_revealed_expected_sales_floor(manufactured_firm, 0.0)
+
+        self.assertGreater(manufactured_floor, food_floor)
+
+    def test_firm_audit_records_no_machinery_when_investment_market_is_empty(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=3, seed=220)
+        )
+        target_firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        for firm in sim.firms:
+            if firm.sector == "manufactured":
+                firm.active = False
+                firm.workers.clear()
+
+        target_firm.cash = 1_200.0
+        target_firm.sales_this_period = 100.0
+        target_firm.last_expected_sales = 95.0
+        target_firm.last_production = 100.0
+        target_firm.inventory = 0.0
+        target_firm.target_inventory = 20.0
+        target_firm.last_wage_bill = 80.0
+        target_firm.last_input_cost = 10.0
+        target_firm.last_transport_cost = 5.0
+        target_firm.last_fixed_overhead = 10.0
+        target_firm.last_capital_charge = 2.0
+        target_firm.last_interest_cost = 0.0
+        target_firm.sales_history = [100.0, 100.0, 100.0, 100.0]
+        target_firm.expected_sales_history = [95.0, 95.0, 95.0, 95.0]
+        target_firm.observed_demand_history = [130.0, 130.0, 130.0, 130.0]
+        target_firm.production_history = [100.0, 100.0, 100.0, 100.0]
+        sim._cash_before_sales[target_firm.id] = 200.0
+
+        sim._settle_firms()
+
+        self.assertEqual(target_firm.last_industrial_investment_spending, 0.0)
+        self.assertGreater(target_firm.last_unfilled_investment_budget, 0.0)
+        self.assertEqual(target_firm.last_investment_decision_reason, "no_habia_maquinaria_disponible")
+
+    def test_contraction_is_frozen_when_observed_demand_is_still_strong(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=209)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        firm.workers = [
+            household.id
+            for household in sim.households
+            if household.alive and sim._household_labor_capacity(household) > 0.0
+        ][:12]
+        firm.age = 4
+        firm.cash = 800.0
+        firm.capital = 1.0
+        firm.productivity = 2.0
+        firm.technology = 1.0
+        firm.price = 11.0
+        firm.last_profit = 18.0
+        firm.last_revenue = 220.0
+        firm.last_sales = 40.0
+        firm.last_expected_sales = 40.0
+        firm.last_observed_demand = 78.0
+        firm.last_production = 20.0
+        firm.last_wage_bill = 120.0
+        firm.last_input_cost = 15.0
+        firm.last_transport_cost = 10.0
+        firm.last_fixed_overhead = 20.0
+        firm.last_interest_cost = 0.0
+        firm.loss_streak = 0
+        firm.sales_history = [40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        firm.expected_sales_history = [40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        firm.observed_demand_history = [78.0, 78.0, 78.0, 78.0, 78.0, 78.0]
+
+        retained_workers = sim._constrained_headcount_after_contraction(firm, 7, len(firm.workers))
+
+        self.assertEqual(retained_workers, len(firm.workers))
+
     def test_baseline_demand_stays_closer_to_structure_during_learning_warmup(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=17)
@@ -3547,10 +4432,15 @@ class MoneyFlowTests(unittest.TestCase):
         sector_key = "food"
         target_base_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == sector_key)
         target_shortage_firm = next(firm for firm in shortage_sim.firms if firm.active and firm.sector == sector_key)
+        base_supplier_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == "manufactured")
+        shortage_supplier_firm = next(firm for firm in shortage_sim.firms if firm.active and firm.sector == "manufactured")
 
-        for sim, target_firm in ((base_sim, target_base_firm), (shortage_sim, target_shortage_firm)):
+        for sim, target_firm, supplier_firm in (
+            (base_sim, target_base_firm, base_supplier_firm),
+            (shortage_sim, target_shortage_firm, shortage_supplier_firm),
+        ):
             for firm in sim.firms:
-                if firm.id != target_firm.id:
+                if firm.id not in (target_firm.id, supplier_firm.id):
                     firm.active = False
                     firm.workers.clear()
             target_firm.sales_this_period = 150.0
@@ -3573,6 +4463,15 @@ class MoneyFlowTests(unittest.TestCase):
             target_firm.market_share_ambition = 1.15
             sim._cash_before_sales[target_firm.id] = 210.0
 
+            supplier_firm.cash = 600.0
+            supplier_firm.inventory = max(120.0, supplier_firm.inventory)
+            supplier_firm.price = 18.0
+            supplier_firm.last_sales = max(60.0, supplier_firm.last_sales)
+            supplier_firm.last_expected_sales = max(60.0, supplier_firm.last_expected_sales)
+            supplier_firm.sales_history = [60.0, 62.0, 64.0, 66.0, 68.0, 70.0]
+            supplier_firm.expected_sales_history = [60.0, 62.0, 64.0, 66.0, 68.0, 70.0]
+            supplier_firm.observed_demand_history = [60.0, 62.0, 64.0, 66.0, 68.0, 70.0]
+
         base_sim._period_sector_sales_units[sector_key] = 150.0
         shortage_sim._period_sector_sales_units[sector_key] = 150.0
         base_sim._period_sector_revealed_unmet_units[sector_key] = 0.0
@@ -3583,6 +4482,55 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertGreater(shortage_sim._period_investment_spending, base_sim._period_investment_spending)
         self.assertGreater(target_shortage_firm.last_technology_investment, target_base_firm.last_technology_investment)
+
+    def test_observed_demand_raises_firm_expansion_credit_need(self) -> None:
+        base_sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=33)
+        )
+        observed_sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=33)
+        )
+        sector_key = "food"
+        target_base_firm = next(firm for firm in base_sim.firms if firm.active and firm.sector == sector_key)
+        target_observed_firm = next(firm for firm in observed_sim.firms if firm.active and firm.sector == sector_key)
+
+        for sim, target_firm in ((base_sim, target_base_firm), (observed_sim, target_observed_firm)):
+            for firm in sim.firms:
+                if firm.id != target_firm.id:
+                    firm.active = False
+                    firm.workers.clear()
+            target_firm.sales_this_period = 90.0
+            target_firm.last_worker_count = 12
+            target_firm.last_sales = 90.0
+            target_firm.last_expected_sales = 90.0
+            target_firm.last_observed_demand = 90.0
+            target_firm.last_production = 90.0
+            target_firm.sales_history = [90.0, 90.0, 90.0, 90.0, 90.0, 90.0]
+            target_firm.expected_sales_history = [90.0, 90.0, 90.0, 90.0, 90.0, 90.0]
+            target_firm.observed_demand_history = [90.0, 90.0, 90.0, 90.0, 90.0, 90.0]
+            target_firm.cash = 520.0
+            target_firm.capital = 80.0
+            target_firm.price = 12.0
+            target_firm.wage_offer = 10.0
+            target_firm.last_wage_bill = 120.0
+            target_firm.last_input_cost = 22.0
+            target_firm.last_transport_cost = 9.0
+            target_firm.last_fixed_overhead = 28.0
+            target_firm.last_capital_charge = 6.0
+            target_firm.last_interest_cost = 0.0
+            target_firm.last_profit = 24.0
+            target_firm.last_revenue = 180.0
+            target_firm.market_share_ambition = 1.15
+
+        observed_target = target_observed_firm
+        observed_target.last_observed_demand = 150.0
+        observed_target.observed_demand_history = [150.0, 150.0, 150.0, 150.0, 150.0, 150.0]
+        observed_target.last_competitive_demand_rejections = 20.0
+
+        base_need = base_sim._estimate_firm_expansion_credit_need(target_base_firm)
+        observed_need = observed_sim._estimate_firm_expansion_credit_need(observed_target)
+
+        self.assertGreater(observed_need, base_need)
 
     def test_revealed_shortage_can_trigger_extra_entry(self) -> None:
         sim = EconomySimulation(
@@ -3692,6 +4640,31 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertLess(adjusted_target_price, firm.price)
         self.assertGreaterEqual(adjusted_target_price, variable_unit_cost * 1.01)
 
+    def test_nonessential_target_margin_falls_when_sales_are_lost(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=3, startup_grace_periods=0, seed=44)
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "clothing")
+        spec = SECTOR_BY_KEY[firm.sector]
+
+        firm.price = 15.0
+        firm.last_unit_cost = 10.0
+        firm.last_sales = 12.0
+        firm.last_expected_sales = 60.0
+        firm.last_competitive_demand_rejections = 30.0
+        firm.last_observed_demand = 45.0
+        firm.sales_history = [58.0, 46.0, 28.0, 12.0]
+        firm.expected_sales_history = [60.0, 58.0, 55.0, 60.0]
+        firm.volume_preference = 1.35
+        firm.market_share_ambition = 1.20
+        firm.price_aggressiveness = 0.85
+
+        baseline_margin = spec.markup * max(0.70, min(1.30, 1.0 - 0.18 * (firm.markup_tolerance - 1.0)))
+        adjusted_margin = sim._target_margin_for_firm(firm, spec, average_unit_cost=10.0)
+
+        self.assertLess(adjusted_margin, baseline_margin)
+        self.assertLess(adjusted_margin, spec.markup)
+
     def test_startup_essential_capacity_covers_structural_need(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=43)
@@ -3712,7 +4685,13 @@ class MoneyFlowTests(unittest.TestCase):
                 for firm in sim.firms
                 if firm.active and firm.sector == sector_key
             )
+            real_startup_capacity = sum(
+                sim._firm_effective_productivity(firm) * sim._firm_effective_labor_units_for_production(firm)
+                for firm in sim.firms
+                if firm.active and firm.sector == sector_key
+            )
             self.assertGreaterEqual(startup_capacity, structural_need)
+            self.assertGreaterEqual(real_startup_capacity, structural_need)
 
     def test_clothing_startup_target_gets_extra_supply_buffer(self) -> None:
         sim = EconomySimulation(
@@ -3727,6 +4706,18 @@ class MoneyFlowTests(unittest.TestCase):
 
         self.assertGreater(sim._startup_essential_target_units("clothing"), base_target)
 
+    def test_startup_essential_supply_buffer_stays_close_to_base_need(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=46)
+        )
+
+        self.assertAlmostEqual(
+            sim._startup_essential_supply_multiplier("food"),
+            sim.config.startup_essential_supply_buffer,
+            places=6,
+        )
+        self.assertLess(sim._startup_essential_supply_multiplier("food"), 2.0)
+
     def test_startup_labor_relief_keeps_sector_expected_sales_scaled_to_sector_need(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(periods=1, households=300, firms_per_sector=4, seed=43)
@@ -3740,7 +4731,158 @@ class MoneyFlowTests(unittest.TestCase):
             )
             startup_target = sim._startup_essential_target_units(sector_key)
             self.assertGreater(sector_expected_sales, 0.0)
-            self.assertLessEqual(sector_expected_sales, startup_target)
+            self.assertLessEqual(sector_expected_sales, startup_target + 1e-6)
+
+    def test_manufactured_goods_are_heterogeneous_capital_tools(self) -> None:
+        spec = SECTOR_BY_KEY["manufactured"]
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=180, firms_per_sector=2, seed=47)
+        )
+        buyer = next(firm for firm in sim.firms if firm.active and firm.sector == "food")
+        suppliers = [firm for firm in sim.firms if firm.active and firm.sector == "manufactured"]
+        self.assertGreaterEqual(len(suppliers), 2)
+        weaker_supplier, stronger_supplier = suppliers[:2]
+
+        for firm in suppliers:
+            firm.inventory = 4.0
+            firm.capital_goods_sales_this_period = 0.0
+            firm.workers.clear()
+
+        weaker_supplier.price = 120.0
+        weaker_supplier.capital = 10.0
+        weaker_supplier.technology = 0.82
+        stronger_supplier.price = 180.0
+        stronger_supplier.capital = 260.0
+        stronger_supplier.technology = 1.8
+
+        educated_workers = [
+            household
+            for household in sim.households
+            if household.alive and sim._household_labor_capacity(household) > 0.0
+        ][:8]
+        for household in educated_workers:
+            household.school_years_completed = sim.config.school_years_required
+            household.university_years_completed = sim.config.university_years_required
+            household.employed_by = stronger_supplier.id
+            stronger_supplier.workers.append(household.id)
+
+        spent, units, quality, capital_service = sim._purchase_industrial_investment_goods(
+            buyer,
+            spec.base_price * 6.0,
+        )
+
+        self.assertAlmostEqual(spec.base_productivity, 0.30, places=6)
+        self.assertLess(spec.base_price, 200.0)
+        self.assertGreater(
+            sim._manufacturing_capital_goods_quality(stronger_supplier),
+            sim._manufacturing_capital_goods_quality(weaker_supplier),
+        )
+        self.assertNotEqual(
+            sim._manufacturing_capital_goods_labor_required(stronger_supplier),
+            sim._manufacturing_capital_goods_labor_required(weaker_supplier),
+        )
+        self.assertGreaterEqual(
+            sim._manufacturing_capital_goods_supported_workers(stronger_supplier),
+            sim.config.firm_capital_goods_supported_workers_min,
+        )
+        self.assertGreaterEqual(units, 1.0)
+        self.assertGreater(spent, 0.0)
+        self.assertLessEqual(quality, sim.config.firm_capital_goods_quality_ceiling)
+        self.assertGreater(capital_service, 0.0)
+
+    def test_manufacturing_capacity_is_three_units_per_ten_workers_until_twenty_workers(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(
+                periods=1,
+                households=180,
+                firms_per_sector=2,
+                seed=48,
+                government_public_capital_productivity_gain=0.0,
+            )
+        )
+        firm = next(firm for firm in sim.firms if firm.active and firm.sector == "manufactured")
+        workers = [
+            household
+            for household in sim.households
+            if household.alive and sim._household_labor_capacity(household) > 0.0
+        ][:30]
+        firm.workers.clear()
+        firm.productivity = SECTOR_BY_KEY["manufactured"].base_productivity
+        firm.technology = 1.0
+
+        for household in workers:
+            household.employed_by = firm.id
+            household.age_periods = int(30 * sim.config.periods_per_year)
+            household.health_fragility = 0.0
+            household.housing_deprivation_streak = 0
+            household.clothing_deprivation_streak = 0
+        sim._period_household_labor_capacity_cache.clear()
+
+        firm.workers = [household.id for household in workers[:10]]
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 3.0, places=6)
+
+        firm.workers = [household.id for household in workers[:20]]
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 6.0, places=6)
+
+        firm.workers = [household.id for household in workers[:30]]
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 6.0, places=6)
+
+    def test_competitive_demand_rejections_register_even_without_stockout(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=1, households=160, firms_per_sector=2, seed=49)
+        )
+        sector_key = "manufactured"
+        cheap_firm, expensive_firm = sorted(
+            [firm for firm in sim.firms if firm.active and firm.sector == sector_key],
+            key=lambda firm: firm.id,
+        )
+
+        cheap_firm.price = 5.0
+        expensive_firm.price = 6.0
+        cheap_firm.inventory = 4.0
+        expensive_firm.inventory = 20.0
+        cheap_firm.inventory_batches = [4.0]
+        expensive_firm.inventory_batches = [20.0]
+
+        sim._refresh_period_sector_caches()
+        sim._reset_period_counters()
+        sim._cash_before_sales = {firm.id: firm.cash for firm in sim.firms}
+        spending_log = {spec.key: 0.0 for spec in SECTOR_SPECS}
+
+        _, bought_total = sim._purchase_from_sector(1.0, sector_key, 10.0, 1_000.0, spending_log)
+        sim._settle_firms()
+
+        self.assertEqual(bought_total, 10.0)
+        self.assertGreater(cheap_firm.capacity_shortage_rejections_this_period, 0.0)
+        self.assertGreater(cheap_firm.last_capacity_shortage_rejections, 0.0)
+        self.assertGreater(cheap_firm.last_observed_demand, cheap_firm.last_sales)
+        self.assertGreater(sim._firm_capacity_shortage_signal(cheap_firm), 0.0)
+
+        expensive_base = sim._firm_competitive_demand_loss_signal(expensive_firm)
+        expensive_firm.price = 8.0
+        expensive_higher = sim._firm_competitive_demand_loss_signal(expensive_firm)
+        self.assertGreater(expensive_higher, expensive_base)
+
+    def test_firm_snapshot_exposes_installed_production_capacity(self) -> None:
+        sim = EconomySimulation(
+            SimulationConfig(periods=2, households=180, firms_per_sector=2, seed=53)
+        )
+        sim.step()
+
+        snapshots = sim._build_firm_period_snapshots()
+        food_snapshot = next(
+            snapshot
+            for snapshot in snapshots
+            if snapshot.active and snapshot.sector == "food"
+        )
+
+        self.assertGreaterEqual(food_snapshot.installed_production_capacity_units, 0.0)
+        self.assertGreaterEqual(food_snapshot.capacity_utilization_rate, 0.0)
+        self.assertLessEqual(food_snapshot.capacity_utilization_rate, 1.5)
+        self.assertLessEqual(
+            food_snapshot.production,
+            food_snapshot.installed_production_capacity_units + 1e-6,
+        )
 
     def test_startup_essential_prices_refresh_to_current_unit_cost(self) -> None:
         sim = EconomySimulation(

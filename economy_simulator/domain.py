@@ -58,14 +58,14 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
     SectorSpec(
         key="manufactured",
         name="Manufacturing / industrial goods",
-        base_price=9.0,
-        base_wage=7.4,
-        base_productivity=0.92,
-        household_demand_share=0.15,
+        base_price=160.0,
+        base_wage=18.0,
+        base_productivity=0.30,
+        household_demand_share=0.0,
         essential_need=0.0,
-        discretionary_weight=0.60,
-        target_inventory_ratio=0.24,
-        markup=0.24,
+        discretionary_weight=0.0,
+        target_inventory_ratio=0.0,
+        markup=0.35,
     ),
     SectorSpec(
         key="leisure",
@@ -119,7 +119,7 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
 
 SECTOR_BY_KEY = {spec.key: spec for spec in SECTOR_SPECS}
 ESSENTIAL_SECTOR_KEYS = ("food", "housing", "clothing")
-DISCRETIONARY_SECTOR_KEYS = ("manufactured", "leisure", "school", "university")
+DISCRETIONARY_SECTOR_KEYS = ("leisure", "school", "university")
 
 
 @dataclass
@@ -162,7 +162,9 @@ class Household:
     last_birth_period: int = -999
     dependent_children: int = 0
     employment_tenure: int = 0
+    unemployment_duration: int = 0
     job_change_aversion: float = 0.0
+    reservation_wage_distress_sensitivity: float = 1.0
     employment_insecurity_memory: float = 0.0
     wage_income: float = 0.0
     last_income: float = 0.0
@@ -286,6 +288,9 @@ class Firm:
     stability_sensitivity: float = 1.0
     investment_animal_spirits: float = 1.0
     forecast_caution: float = 1.0
+    stockout_perception_bias: float = 1.0
+    stockout_sensitivity: float = 1.0
+    stockout_patience: float = 1.0
     active: bool = True
     bank_id: int = 0
     age: int = 0
@@ -293,7 +298,13 @@ class Firm:
     workers: list[int] = field(default_factory=list)
     target_inventory: float = 0.0
     sales_this_period: float = 0.0
+    stockout_rejections_this_period: float = 0.0
+    competitive_demand_rejections_this_period: float = 0.0
+    capacity_shortage_rejections_this_period: float = 0.0
+    capital_goods_sales_this_period: float = 0.0
     sales_history: list[float] = field(default_factory=list)
+    observed_demand_history: list[float] = field(default_factory=list)
+    stockout_rejection_history: list[float] = field(default_factory=list)
     expected_sales_history: list[float] = field(default_factory=list)
     production_history: list[float] = field(default_factory=list)
     inventory_batches: list[float] = field(default_factory=list)
@@ -310,11 +321,23 @@ class Firm:
     last_capital_charge: float = 0.0
     last_inventory_carry_cost: float = 0.0
     last_inventory_waste_cost: float = 0.0
+    last_severance_cost: float = 0.0
+    last_effective_marginal_unit_cost: float = 0.0
     last_unit_cost: float = 0.0
     last_market_share: float = 0.0
     last_expected_sales: float = 0.0
+    last_stockout_rejections: float = 0.0
+    last_competitive_demand_rejections: float = 0.0
+    last_capacity_shortage_rejections: float = 0.0
+    last_observed_demand: float = 0.0
+    last_stockout_pressure: float = 0.0
     market_fragility_belief: float = 0.0
     forecast_error_belief: float = 0.15
+    last_capital_investment: float = 0.0
+    last_industrial_investment_spending: float = 0.0
+    last_investment_goods_units: float = 0.0
+    last_unfilled_investment_budget: float = 0.0
+    last_investment_decision_reason: str = "sin_decision_registrada"
     last_technology_investment: float = 0.0
     last_technology_gain: float = 0.0
     last_interest_cost: float = 0.0
@@ -322,6 +345,8 @@ class Firm:
     labor_offer_rejection_wage_floor: float = 0.0
     last_labor_offer_rejections: int = 0
     last_labor_offer_rejection_wage_floor: float = 0.0
+    vacancy_duration: int = 0
+    last_vacancy_duration: int = 0
     loan_balance: float = 0.0
     loan_delinquency_periods: int = 0
     loan_restructure_count: int = 0
@@ -344,6 +369,7 @@ class FirmPeriodSnapshot:
     workers: int
     desired_workers: int
     vacancies: int
+    vacancy_duration: int
     worker_exits: int
     worker_quits: int
     worker_dismissals: int
@@ -358,6 +384,12 @@ class FirmPeriodSnapshot:
     transport_cost_per_unit: float
     fixed_overhead: float
     capital_charge: float
+    capital_efficiency_percent: float
+    technology_level_percent: float
+    effective_worker_productivity_capacity: float
+    installed_production_capacity_units: float
+    capacity_utilization_rate: float
+    effective_marginal_unit_cost: float
     unit_cost: float
     markup_tolerance: float
     volume_preference: float
@@ -366,18 +398,30 @@ class FirmPeriodSnapshot:
     price_aggressiveness: float
     cash_conservatism: float
     market_share_ambition: float
+    investment_animal_spirits: float
     demand_elasticity: float
     forecast_caution: float
     learning_maturity: float
     technology: float
+    capital_investment: float
     technology_investment: float
     technology_gain: float
+    industrial_investment_spending: float
+    investment_goods_units: float
+    unfilled_investment_budget: float
+    investment_decision_reason: str
+    stockout_rejected_units: float
+    competitive_demand_rejected_units: float
+    capacity_shortage_rejected_units: float
+    observed_demand_units: float
+    stockout_pressure: float
     sales: float
     expected_sales: float
     revenue: float
     production: float
     profit: float
     payroll_total: float
+    severance_total: float
     total_cost: float
     loss_streak: int
     market_share: float
@@ -402,9 +446,18 @@ class FamilyPeriodSnapshot:
     total_family_income: float
     family_employment_rate: float
     family_cash_available: float
+    family_period_income_cash: float
+    family_start_savings_cash: float
     family_cash_spent: float
+    family_income_spent_cash: float
+    family_savings_spent_cash: float
+    family_period_net_saving_cash: float
     family_voluntary_saved_cash: float
     family_involuntary_retained_cash: float
+    family_expected_salary: float
+    family_accepted_salary: float
+    basic_goods_coverage_percent: float
+    basic_goods_shortfall_reason: str
     marginal_propensity_to_spend: float
     marginal_propensity_to_save: float
     necessary_essential_demand_units: float
@@ -419,6 +472,7 @@ class SimulationConfig:
     seed: int = 7
     periods_per_year: int = 12
     firms_per_sector: int = 20
+    initial_manufacturing_firms: int = 2
     commercial_banks: int = 3
     target_unemployment: float = 0.08
     capital_scale: float = 350.0
@@ -435,6 +489,21 @@ class SimulationConfig:
     firm_macro_stability_investment_weight: float = 0.16
     firm_expansion_credit_interest_sensitivity: float = 0.38
     firm_expansion_credit_max_revenue_share: float = 0.30
+    firm_investment_gross_revenue_share: float = 0.20
+    firm_capital_goods_price_multiplier: float = 1.0
+    manufactured_capital_goods_capacity_share: float = 1.0
+    manufactured_minimum_active_output_units: float = 1.0
+    manufactured_minimum_capacity_buffer: float = 1.15
+    manufactured_full_capacity_workers: float = 20.0
+    firm_capital_goods_quality_floor: float = 0.65
+    firm_capital_goods_quality_ceiling: float = 1.40
+    firm_capital_goods_labor_required_min: float = 5.0
+    firm_capital_goods_labor_required_max: float = 18.0
+    firm_capital_goods_supported_workers_min: float = 4.0
+    firm_capital_goods_supported_workers_max: float = 16.0
+    firm_workforce_skill_investment_weight: float = 0.22
+    firm_labor_full_efficiency_capital: float = 2.5
+    firm_labor_diminishing_absorption: float = 0.85
     firm_investment_knowledge_floor: float = 0.90
     firm_investment_knowledge_ceiling: float = 1.18
     firm_investment_knowledge_university_weight: float = 0.65
@@ -447,14 +516,22 @@ class SimulationConfig:
     startup_firm_cash: float = 180.0
     startup_firm_capital: float = 80.0
     startup_inventory_multiplier: float = 0.75
+    startup_liquid_asset_buffer_share: float = 0.20
     startup_expected_sales_share: float = 0.65
     inventory_carry_cost_share: float = 0.012
+    firm_stockout_perception_deviation: float = 0.35
+    firm_stockout_expectation_weight: float = 0.45
+    firm_stockout_inventory_buffer_weight: float = 0.35
     firm_restart_package_multiplier: float = 0.1
     firm_restart_wealth_threshold: float = 1.0
     firm_restart_min_scale: float = 0.01
     firm_restart_max_scale: float = 3.0
     employment_contract_periods: int = 12
     contract_notice_periods: int = 2
+    severance_months_per_year: float = 1.0
+    severance_max_months: float = 12.0
+    severance_layoff_payback_periods: int = 6
+    severance_cash_stress_payroll_share: float = 0.50
     essential_protection_periods: int = 24
     startup_essential_supply_buffer: float = 1.35
     startup_clothing_supply_multiplier: float = 2.0
@@ -546,11 +623,15 @@ class SimulationConfig:
     initial_owner_wealth_max: float = 220.0
     replacement_enabled: bool = True
     central_bank_enabled: bool = True
-    central_bank_rule: str = "goods_growth"
+    central_bank_rule: str = "inflation_targeting"
     central_bank_target_velocity: float = 0.20
     central_bank_target_annual_inflation: float = 0.04
     central_bank_max_issue_share: float = 0.05
     central_bank_goods_growth_pass_through: float = 1.0
+    central_bank_inflation_gap_liquidity_weight: float = 1.25
+    central_bank_unemployment_gap_liquidity_weight: float = 0.035
+    central_bank_demand_gap_liquidity_weight: float = 0.015
+    central_bank_credit_accommodation_share: float = 0.55
     central_bank_monetary_gap_rate_weight: float = 0.20
     central_bank_omo_response_share: float = 0.60
     central_bank_dynamic_reserve_ratio_enabled: bool = True
@@ -593,12 +674,13 @@ class SimulationConfig:
     entrepreneur_consumption_share: float = 0.20
     entrepreneur_vault_share: float = 0.02
     reservation_wage_adjustment_speed: float = 0.45
-    reservation_wage_floor_share: float = 0.90
     reservation_wage_reference_cushion_months: float = 2.5
     reservation_wage_liquidity_discount_max: float = 0.22
     reservation_wage_liquidity_premium_max: float = 0.10
-    living_wage_bargaining_weight: float = 0.28
-    essential_wage_bargaining_bonus: float = 0.10
+    reservation_wage_unemployment_discount_max: float = 0.18
+    reservation_wage_unemployment_pressure_periods: int = 6
+    reservation_wage_distress_sensitivity_min: float = 0.45
+    reservation_wage_distress_sensitivity_max: float = 1.75
     labor_offer_rejection_catchup_share: float = 0.50
     labor_offer_rejection_response_cap: float = 0.10
     firm_market_memory_years: float = 3.0

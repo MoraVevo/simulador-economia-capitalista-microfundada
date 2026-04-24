@@ -201,9 +201,39 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
             "starting_workers": "Trabajadores inicio",
             "expected_sales": "Ventas esperadas",
             "sales": "Ventas reales",
+            "production": "Produccion realizada",
             "inventory": "Inventario",
             "price": "Precio venta",
+            "capital": "Capital productivo",
+            "capital_efficiency_percent": "Eficiencia del capital %",
+            "technology": "Indice tecnologia",
+            "technology_level_percent": "Tecnologia sobre maximo %",
+            "investment_animal_spirits": "Propension interna a invertir",
+            "productivity_investment_propensity": "Propension invertir productividad / ingresos",
+            "total_investment_propensity": "Propension inversion total / ingresos",
+            "liquidity_reinvestment_rate": "Reinversion sobre liquidez disponible",
+            "capital_investment": "Capital incorporado por inversion",
+            "technology_investment": "Tecnologia incorporada por inversion",
+            "technology_gain": "Ganancia tecnologia por inversion",
+            "industrial_investment_spending": "Gasto compra bienes industriales",
+            "investment_goods_units": "Unidades industriales compradas",
+            "unfilled_investment_budget": "Presupuesto inversion no cubierto",
+            "investment_decision_reason": "Razon decision inversion maquinaria",
+            "productivity": "Productividad base trabajador",
+            "effective_worker_productivity_capacity": "Productividad efectiva por trabajador",
+            "installed_production_capacity_units": "Capacidad instalada de produccion",
+            "capacity_utilization_rate": "Utilizacion de capacidad %",
+            "stockout_rejected_units": "Demanda rechazada por falta de inventario",
+            "observed_demand_units": "Demanda observada total",
+            "stockout_pressure": "Presion por falta de inventario",
+            "effective_marginal_unit_cost": "Costo marginal efectivo unitario",
+            "price_minus_marginal_unit_cost": "Brecha precio - costo marginal",
+            "price_to_marginal_unit_cost_ratio": "Precio / costo marginal",
+            "sales_realization_ratio": "Ventas reales / esperadas",
+            "probable_loss_cause": "Causa probable de perdida",
+            "recommended_loss_response": "Respuesta sugerida ante perdida",
             "payroll_total": "Nomina total periodo",
+            "severance_total": "Liquidacion despidos periodo",
             "total_cost": "Costo total periodo",
             "firm_income_total": "Ingresos totales periodo",
             "firm_profit_total": "Ganancias totales periodo",
@@ -225,9 +255,39 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Trabajadores inicio",
         "Ventas esperadas",
         "Ventas reales",
+        "Produccion realizada",
         "Inventario",
         "Precio venta",
+        "Capital productivo",
+        "Eficiencia del capital %",
+        "Indice tecnologia",
+        "Tecnologia sobre maximo %",
+        "Propension interna a invertir",
+        "Propension invertir productividad / ingresos",
+        "Propension inversion total / ingresos",
+        "Reinversion sobre liquidez disponible",
+        "Capital incorporado por inversion",
+        "Tecnologia incorporada por inversion",
+        "Ganancia tecnologia por inversion",
+        "Gasto compra bienes industriales",
+        "Unidades industriales compradas",
+        "Presupuesto inversion no cubierto",
+        "Razon decision inversion maquinaria",
+        "Productividad base trabajador",
+        "Productividad efectiva por trabajador",
+        "Capacidad instalada de produccion",
+        "Utilizacion de capacidad %",
+        "Demanda rechazada por falta de inventario",
+        "Demanda observada total",
+        "Presion por falta de inventario",
+        "Costo marginal efectivo unitario",
+        "Brecha precio - costo marginal",
+        "Precio / costo marginal",
+        "Ventas reales / esperadas",
+        "Causa probable de perdida",
+        "Respuesta sugerida ante perdida",
         "Nomina total periodo",
+        "Liquidacion despidos periodo",
         "Costo total periodo",
         "Ingresos totales periodo",
         "Ganancias totales periodo",
@@ -239,6 +299,29 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Salario promedio efectivo",
         "Tasa desempleo total",
     ]
+    optional_numeric_columns = [
+        "Eficiencia del capital %",
+        "Tecnologia sobre maximo %",
+        "Propension interna a invertir",
+        "Propension invertir productividad / ingresos",
+        "Propension inversion total / ingresos",
+        "Reinversion sobre liquidez disponible",
+        "Capital incorporado por inversion",
+        "Tecnologia incorporada por inversion",
+        "Ganancia tecnologia por inversion",
+        "Gasto compra bienes industriales",
+        "Unidades industriales compradas",
+        "Presupuesto inversion no cubierto",
+        "Productividad efectiva por trabajador",
+        "Demanda rechazada por falta de inventario",
+        "Demanda observada total",
+        "Presion por falta de inventario",
+        "Costo marginal efectivo unitario",
+        "Liquidacion despidos periodo",
+    ]
+    for column in optional_numeric_columns:
+        if column not in renamed.columns:
+            renamed[column] = 0.0
     return renamed[ordered_columns].copy()
 
 
@@ -260,9 +343,18 @@ def _rename_family_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
             "total_family_income": "Ingresos totales familia",
             "family_employment_rate": "Tasa empleo familia",
             "family_cash_available": "Efectivo disponible familia periodo",
+            "family_period_income_cash": "Ingreso liquido antes de consumo",
+            "family_start_savings_cash": "Ahorro inicial antes de consumo",
             "family_cash_spent": "Gasto efectivo familia periodo",
-            "family_voluntary_saved_cash": "Ahorro voluntario familia periodo",
+            "family_income_spent_cash": "Ingreso usado para gasto",
+            "family_savings_spent_cash": "Ahorro usado para gasto",
+            "family_period_net_saving_cash": "Ahorro neto del periodo",
+            "family_voluntary_saved_cash": "Efectivo final retenido voluntario",
             "family_involuntary_retained_cash": "Retencion involuntaria familia periodo",
+            "family_expected_salary": "Expectativa salarial familia",
+            "family_accepted_salary": "Salario aceptado familia",
+            "basic_goods_coverage_percent": "Cobertura bienes basicos %",
+            "basic_goods_shortfall_reason": "Razon no cobertura bienes basicos",
             "marginal_propensity_to_spend": "Propension marginal gastar",
             "marginal_propensity_to_save": "Propension marginal ahorrar",
             "necessary_essential_demand_units": "Demanda necesaria esencial periodo",
@@ -284,9 +376,18 @@ def _rename_family_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Ingresos totales familia",
         "Tasa empleo familia",
         "Efectivo disponible familia periodo",
+        "Ingreso liquido antes de consumo",
+        "Ahorro inicial antes de consumo",
         "Gasto efectivo familia periodo",
-        "Ahorro voluntario familia periodo",
+        "Ingreso usado para gasto",
+        "Ahorro usado para gasto",
+        "Ahorro neto del periodo",
+        "Efectivo final retenido voluntario",
         "Retencion involuntaria familia periodo",
+        "Expectativa salarial familia",
+        "Salario aceptado familia",
+        "Cobertura bienes basicos %",
+        "Razon no cobertura bienes basicos",
         "Propension marginal gastar",
         "Propension marginal ahorrar",
         "Demanda necesaria esencial periodo",
@@ -1130,10 +1231,15 @@ def run_country_reports(
                     random_state=_scenario_sample_seed(seed, completed_name, "family_audit"),
                 )
                 annual = _annualize_core_history(monthly)
-                _write_country_xlsx(output_dir / f"{slug}.xlsx", monthly, annual, firm_audit, family_audit)
+                xlsx_path = output_dir / f"{slug}.xlsx"
+                _write_country_xlsx(xlsx_path, monthly, annual, firm_audit, family_audit)
+                print(f"[{completed_name}] xlsx generado: {xlsx_path}", flush=True)
                 if include_csv:
-                    monthly.to_csv(output_dir / f"{slug}_mensual.csv", index=False)
-                    annual.to_csv(output_dir / f"{slug}_anual.csv", index=False)
+                    monthly_csv_path = output_dir / f"{slug}_mensual.csv"
+                    annual_csv_path = output_dir / f"{slug}_anual.csv"
+                    monthly.to_csv(monthly_csv_path, index=False)
+                    annual.to_csv(annual_csv_path, index=False)
+                    print(f"[{completed_name}] csv generados: {monthly_csv_path}, {annual_csv_path}", flush=True)
                 results[completed_name] = (monthly, annual, firm_audit, family_audit)
             except Exception as exc:
                 error_path = output_dir / f"{slug}_error.txt"
@@ -1141,6 +1247,7 @@ def run_country_reports(
                     f"Scenario: {scenario_name}\nError: {exc}\n\n{traceback.format_exc()}",
                     encoding="utf-8",
                 )
+                print(f"[{scenario_name}] error guardado: {error_path}", flush=True)
 
     xlsx_paths = [
         output_dir / f"{_slugify(scenario_name)}.xlsx"
