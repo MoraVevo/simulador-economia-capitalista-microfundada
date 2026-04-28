@@ -9,7 +9,14 @@ import pandas as pd
 
 from .domain import SimulationConfig, SimulationResult
 from .engine import EconomySimulation
-from .reporting import core_history_frame, family_audit_frame, firm_audit_frame, firm_history_frame
+from .reporting import (
+    bank_history_frame,
+    core_history_frame,
+    family_audit_frame,
+    firm_audit_frame,
+    firm_history_frame,
+    monetary_audit_frame,
+)
 
 
 def _with_policy_values(config: SimulationConfig, policy_values: dict[str, float | str]) -> SimulationConfig:
@@ -61,6 +68,7 @@ def _run_scenario(
     log_every: int = 0,
     track_firm_history: bool = False,
     track_family_history: bool = False,
+    track_bank_history: bool = False,
 ) -> tuple[SimulationResult, EconomySimulation]:
     config = SimulationConfig(
         periods=months,
@@ -70,6 +78,7 @@ def _run_scenario(
         firms_per_sector=firms_per_sector,
         track_firm_history=track_firm_history,
         track_family_history=track_family_history,
+        track_bank_history=track_bank_history,
     )
     config = _with_policy_values(config, base_policy_values)
     simulation = EconomySimulation(config)
@@ -115,6 +124,7 @@ def _run_scenario(
             banks=simulation.banks,
             government=simulation.government,
             family_history=simulation.family_history,
+            bank_history=simulation.bank_history,
         )
     else:
         for month in range(1, months + 1):
@@ -150,6 +160,7 @@ def _run_scenario(
             banks=simulation.banks,
             government=simulation.government,
             family_history=simulation.family_history,
+            bank_history=simulation.bank_history,
         )
     if log_every > 0 and result.history:
         latest = result.history[-1]
@@ -190,6 +201,7 @@ def run_scenario_history(
         log_every=log_every,
         track_firm_history=False,
         track_family_history=False,
+        track_bank_history=False,
     )
     history_df = core_history_frame(
         result.history,
@@ -227,6 +239,7 @@ def run_scenario_export_bundle(
         log_every=log_every,
         track_firm_history=True,
         track_family_history=True,
+        track_bank_history=True,
     )
     monthly_df = core_history_frame(
         result.history,
@@ -236,6 +249,12 @@ def run_scenario_export_bundle(
     firms_df = firm_history_frame(result)
     firm_audit_df = firm_audit_frame(firms_df, monthly_df)
     family_audit_df = family_audit_frame(simulation)
+    monetary_audit_df = monetary_audit_frame(
+        result.history,
+        periods_per_year=result.config.periods_per_year,
+        target_unemployment=result.config.target_unemployment,
+    )
+    bank_audit_df = bank_history_frame(result)
     sample_label = scenario_name or "Escenario"
     if audit_firm_sample_size > 0:
         firm_audit_df = _sample_audit_entities(
@@ -255,6 +274,8 @@ def run_scenario_export_bundle(
         "monthly": monthly_df.to_json(orient="split"),
         "firm_audit": firm_audit_df.to_json(orient="split"),
         "family_audit": family_audit_df.to_json(orient="split"),
+        "monetary_audit": monetary_audit_df.to_json(orient="split"),
+        "bank_audit": bank_audit_df.to_json(orient="split"),
     }
     return json.dumps(payload)
 

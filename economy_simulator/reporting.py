@@ -4,7 +4,14 @@ from dataclasses import asdict
 
 import pandas as pd
 
-from .domain import FirmPeriodSnapshot, PeriodSnapshot, SECTOR_BY_KEY, SECTOR_SPECS, SimulationResult
+from .domain import (
+    BankPeriodSnapshot,
+    FirmPeriodSnapshot,
+    PeriodSnapshot,
+    SECTOR_BY_KEY,
+    SECTOR_SPECS,
+    SimulationResult,
+)
 
 
 CORE_HISTORY_COLUMNS = [
@@ -804,6 +811,160 @@ def firm_history_frame(result: SimulationResult) -> pd.DataFrame:
     return pd.DataFrame.from_records(asdict(snapshot) for snapshot in result.firm_history)
 
 
+def bank_history_frame(result: SimulationResult) -> pd.DataFrame:
+    if not result.bank_history:
+        return pd.DataFrame()
+
+    return (
+        pd.DataFrame.from_records(asdict(snapshot) for snapshot in result.bank_history)
+        .sort_values(["period", "bank_id"])
+        .reset_index(drop=True)
+    )
+
+
+def monetary_audit_frame(
+    history: list[PeriodSnapshot],
+    periods_per_year: int = 12,
+    target_unemployment: float = 0.08,
+) -> pd.DataFrame:
+    frame = history_frame(
+        history,
+        periods_per_year=periods_per_year,
+        target_unemployment=target_unemployment,
+    )
+    if frame.empty:
+        return frame
+
+    audit = frame.copy()
+    deposits = audit.get("total_bank_deposits", pd.Series([0.0] * len(audit), index=audit.index)).clip(lower=0.0)
+    reserves = audit.get("total_bank_reserves", pd.Series([0.0] * len(audit), index=audit.index)).clip(lower=0.0)
+    household_credit = audit.get(
+        "total_bank_loans_households",
+        pd.Series([0.0] * len(audit), index=audit.index),
+    ).clip(lower=0.0)
+    firm_credit = audit.get(
+        "total_bank_loans_firms",
+        pd.Series([0.0] * len(audit), index=audit.index),
+    ).clip(lower=0.0)
+    bond_holdings = audit.get(
+        "total_bank_bond_holdings",
+        pd.Series([0.0] * len(audit), index=audit.index),
+    ).clip(lower=0.0)
+    total_credit = household_credit + firm_credit
+    gdp = audit.get("gdp_nominal", pd.Series([0.0] * len(audit), index=audit.index)).clip(lower=0.0)
+    broad_money = audit.get("total_liquid_money", pd.Series([0.0] * len(audit), index=audit.index)).clip(lower=0.0)
+    monetary_base = audit.get(
+        "central_bank_money_supply",
+        pd.Series([0.0] * len(audit), index=audit.index),
+    ).clip(lower=0.0)
+    legal_reserve_ratio = audit.get(
+        "average_bank_reserve_ratio",
+        pd.Series([0.0] * len(audit), index=audit.index),
+    ).clip(lower=0.0)
+    required_reserves = deposits * legal_reserve_ratio
+
+    derived_columns = {
+        "total_credit": total_credit,
+        "household_credit_share": _safe_ratio(household_credit, total_credit),
+        "firm_credit_share": _safe_ratio(firm_credit, total_credit),
+        "credit_to_gdp": _safe_ratio(total_credit, gdp),
+        "household_credit_to_gdp": _safe_ratio(household_credit, gdp),
+        "firm_credit_to_gdp": _safe_ratio(firm_credit, gdp),
+        "deposits_to_gdp": _safe_ratio(deposits, gdp),
+        "broad_money_to_gdp": _safe_ratio(broad_money, gdp),
+        "monetary_base_to_gdp": _safe_ratio(monetary_base, gdp),
+        "money_velocity_calculated": _safe_ratio(gdp, broad_money),
+        "credit_velocity": _safe_ratio(gdp, total_credit),
+        "deposit_multiplier": _safe_ratio(deposits, monetary_base),
+        "credit_multiplier": _safe_ratio(total_credit, monetary_base),
+        "effective_reserve_ratio": _safe_ratio(reserves, deposits),
+        "required_reserves": required_reserves,
+        "excess_reserves": reserves - required_reserves,
+        "excess_reserve_ratio": _safe_ratio(reserves - required_reserves, deposits),
+        "funds_deployed_ratio": _safe_ratio(total_credit + bond_holdings, deposits),
+        "credit_creation_to_gdp": _safe_ratio(
+            audit.get("commercial_bank_credit_creation", pd.Series([0.0] * len(audit), index=audit.index)),
+            gdp,
+        ),
+        "central_bank_issuance_to_money_supply": _safe_ratio(
+            audit.get("central_bank_issuance", pd.Series([0.0] * len(audit), index=audit.index)),
+            monetary_base,
+        ),
+        "nonperforming_loan_share_calculated": _safe_ratio(
+            audit.get("bank_nonperforming_loans", pd.Series([0.0] * len(audit), index=audit.index)),
+            total_credit,
+        ),
+    }
+    audit = _append_derived_columns(audit, derived_columns)
+
+    ordered_columns = [
+        "period",
+        "year",
+        "period_in_year",
+        "gdp_nominal",
+        "real_gdp_nominal",
+        "central_bank_money_supply",
+        "central_bank_target_money_supply",
+        "central_bank_policy_rate",
+        "central_bank_issuance",
+        "cumulative_central_bank_issuance",
+        "central_bank_monetary_gap_share",
+        "total_liquid_money",
+        "money_velocity",
+        "money_velocity_calculated",
+        "broad_money_to_gdp",
+        "monetary_base_to_gdp",
+        "total_bank_deposits",
+        "total_bank_reserves",
+        "average_bank_reserve_ratio",
+        "effective_reserve_ratio",
+        "required_reserves",
+        "excess_reserves",
+        "excess_reserve_ratio",
+        "bank_reserve_coverage_ratio",
+        "bank_liquidity_ratio",
+        "total_credit",
+        "total_bank_loans_households",
+        "total_bank_loans_firms",
+        "household_credit_share",
+        "firm_credit_share",
+        "credit_to_gdp",
+        "household_credit_to_gdp",
+        "firm_credit_to_gdp",
+        "credit_velocity",
+        "commercial_bank_credit_creation",
+        "household_credit_creation",
+        "firm_credit_creation",
+        "firm_expansion_credit_creation",
+        "credit_creation_to_gdp",
+        "deposit_multiplier",
+        "credit_multiplier",
+        "bank_loan_to_deposit_ratio",
+        "funds_deployed_ratio",
+        "total_bank_bond_holdings",
+        "total_bank_assets",
+        "total_bank_liabilities",
+        "bank_equity",
+        "bank_capital_ratio",
+        "bank_asset_liability_ratio",
+        "bank_insolvent_share",
+        "bank_undercapitalized_share",
+        "bank_nonperforming_loans",
+        "bank_nonperforming_loan_share",
+        "nonperforming_loan_share_calculated",
+        "household_delinquent_loans",
+        "firm_delinquent_loans",
+        "bank_writeoffs",
+        "bank_loan_restructures",
+        "bank_recapitalization",
+        "bank_resolution_events",
+        "average_bank_deposit_rate",
+        "average_bank_loan_rate",
+    ]
+    available_columns = [column for column in ordered_columns if column in audit.columns]
+    return audit[available_columns].copy()
+
+
 def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFrame) -> pd.DataFrame:
     if firm_history_frame.empty:
         return firm_history_frame.copy()
@@ -843,6 +1004,9 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "technology_investment": pd.Series([0.0] * len(audit), index=audit.index),
         "industrial_investment_spending": pd.Series([0.0] * len(audit), index=audit.index),
         "investment_goods_units": pd.Series([0.0] * len(audit), index=audit.index),
+        "productivity_goods_spending": pd.Series([0.0] * len(audit), index=audit.index),
+        "capacity_goods_spending": pd.Series([0.0] * len(audit), index=audit.index),
+        "capacity_gain_workers": pd.Series([0.0] * len(audit), index=audit.index),
         "unfilled_investment_budget": pd.Series([0.0] * len(audit), index=audit.index),
         "investment_decision_reason": pd.Series(["sin_decision_registrada"] * len(audit), index=audit.index),
         "investment_animal_spirits": pd.Series([1.0] * len(audit), index=audit.index),
@@ -872,6 +1036,42 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
     audit["productivity_investment_propensity"] = audit["technology_investment"] / revenue_base
     audit["total_investment_propensity"] = audit["industrial_investment_spending"] / revenue_base
     audit["liquidity_reinvestment_rate"] = audit["industrial_investment_spending"] / liquidity_base
+
+    def diagnose_no_productivity_investment(row) -> str:
+        if row["productivity_goods_spending"] > 1e-9:
+            return "si_invirtio_en_producto_A_productividad"
+        if row["technology_level_percent"] >= 92.0:
+            return "cerca_del_techo_tecnologico_rendimiento_marginal_bajo"
+        decision_reason = str(row["investment_decision_reason"])
+        if "mix_B_capacidad" in decision_reason or row["capacity_goods_spending"] > 1e-9:
+            return "priorizo_producto_B_por_saturacion_de_capacidad_instalada"
+        if decision_reason in ("sin_liquidez_para_invertir", "liquidez_reservada_insuficiente_para_invertir"):
+            return "liquidez_insuficiente_o_reservada_para_operar"
+        if decision_reason == "restriccion_financiera_impidio_invertir":
+            return "restriccion_financiera_impidio_invertir"
+        if decision_reason == "liquidez_desaparecio_antes_de_comprar_maquinaria":
+            return "liquidez_desaparecio_antes_de_ejecutar_compra"
+        if decision_reason in (
+            "no_habia_maquinaria_disponible",
+            "presupuesto_no_alcanzo_para_unidad_minima_maquinaria",
+        ):
+            return decision_reason
+        if decision_reason == "no_vio_senal_suficiente_para_invertir":
+            return "sin_senal_suficiente_de_demanda_o_cuello_de_botella_laboral"
+        if decision_reason in ("empresa_nueva_sin_decision_previa", "firma_inactiva", "sin_decision_registrada"):
+            return decision_reason
+        if row["industrial_investment_spending"] <= 1e-9:
+            if row["firm_profit_total"] < 0.0:
+                return "perdidas_o_margen_insuficiente_para_financiar_productividad"
+            if row["stockout_pressure"] <= 0.05 and row["vacancies"] <= 0:
+                return "sin_stockout_ni_vacantes_que_justifiquen_producto_A"
+            return "no_ejecuto_inversion_productiva_revisar_liquidez_y_senal"
+        return "invirtio_en_maquinaria_pero_no_en_producto_A"
+
+    audit["no_productivity_capital_investment_reason"] = audit.apply(
+        diagnose_no_productivity_investment,
+        axis=1,
+    )
 
     def diagnose_loss(row) -> str:
         if row["firm_profit_total"] >= 0.0:
@@ -912,8 +1112,11 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "period_in_year",
         "firm_id",
         "sector",
+        "active",
+        "age",
         "starting_workers",
         "workers",
+        "desired_workers",
         "vacancies",
         "vacancy_duration",
         "expected_sales",
@@ -934,6 +1137,10 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "technology_gain",
         "industrial_investment_spending",
         "investment_goods_units",
+        "productivity_goods_spending",
+        "no_productivity_capital_investment_reason",
+        "capacity_goods_spending",
+        "capacity_gain_workers",
         "unfilled_investment_budget",
         "investment_decision_reason",
         "productivity",
@@ -1067,6 +1274,8 @@ def family_audit_frame(simulation) -> pd.DataFrame:
             0.0,
             simulation._period_family_period_income_cash.get(family_id, 0.0),
         )
+        total_basic_basket_cost = essential_basket_cost + private_school_basket_cost
+        period_income_covers_basic_basket = family_period_income_cash + 1e-9 >= total_basic_basket_cost
         family_start_savings_cash = max(
             0.0,
             simulation._period_family_start_savings_cash.get(family_id, 0.0),
@@ -1128,12 +1337,13 @@ def family_audit_frame(simulation) -> pd.DataFrame:
                 "adult_members": len(adults),
                 "labor_capable_members": len(labor_capable_members),
                 "employed_members": employed_members,
-                "total_basic_basket_cost_including_school": essential_basket_cost + private_school_basket_cost,
+                "total_basic_basket_cost_including_school": total_basic_basket_cost,
                 "private_school_basket_cost": private_school_basket_cost,
                 "total_family_income": family_income_total,
                 "family_employment_rate": employed_members / max(1, len(labor_capable_members)),
                 "family_cash_available": family_cash_available,
                 "family_period_income_cash": family_period_income_cash,
+                "period_income_covers_basic_basket": period_income_covers_basic_basket,
                 "family_start_savings_cash": family_start_savings_cash,
                 "family_cash_spent": family_spent_cash,
                 "family_income_spent_cash": family_income_spent_cash,

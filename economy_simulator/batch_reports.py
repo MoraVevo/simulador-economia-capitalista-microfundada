@@ -217,12 +217,16 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
             "technology_gain": "Ganancia tecnologia por inversion",
             "industrial_investment_spending": "Gasto compra bienes industriales",
             "investment_goods_units": "Unidades industriales compradas",
+            "productivity_goods_spending": "Gasto producto A productividad",
+            "no_productivity_capital_investment_reason": "Motivo no inversion producto A productividad",
+            "capacity_goods_spending": "Gasto producto B capacidad instalada",
+            "capacity_gain_workers": "Trabajadores de capacidad agregados",
             "unfilled_investment_budget": "Presupuesto inversion no cubierto",
             "investment_decision_reason": "Razon decision inversion maquinaria",
             "productivity": "Productividad base trabajador",
             "effective_worker_productivity_capacity": "Productividad efectiva por trabajador",
             "installed_production_capacity_units": "Capacidad instalada de produccion",
-            "capacity_utilization_rate": "Utilizacion de capacidad %",
+            "capacity_utilization_rate": "Uso del techo material de trabajadores %",
             "stockout_rejected_units": "Demanda rechazada por falta de inventario",
             "observed_demand_units": "Demanda observada total",
             "stockout_pressure": "Presion por falta de inventario",
@@ -271,12 +275,16 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Ganancia tecnologia por inversion",
         "Gasto compra bienes industriales",
         "Unidades industriales compradas",
+        "Gasto producto A productividad",
+        "Motivo no inversion producto A productividad",
+        "Gasto producto B capacidad instalada",
+        "Trabajadores de capacidad agregados",
         "Presupuesto inversion no cubierto",
         "Razon decision inversion maquinaria",
         "Productividad base trabajador",
         "Productividad efectiva por trabajador",
         "Capacidad instalada de produccion",
-        "Utilizacion de capacidad %",
+        "Uso del techo material de trabajadores %",
         "Demanda rechazada por falta de inventario",
         "Demanda observada total",
         "Presion por falta de inventario",
@@ -311,8 +319,12 @@ def _rename_firm_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Ganancia tecnologia por inversion",
         "Gasto compra bienes industriales",
         "Unidades industriales compradas",
+        "Gasto producto A productividad",
+        "Gasto producto B capacidad instalada",
+        "Trabajadores de capacidad agregados",
         "Presupuesto inversion no cubierto",
         "Productividad efectiva por trabajador",
+        "Uso del techo material de trabajadores %",
         "Demanda rechazada por falta de inventario",
         "Demanda observada total",
         "Presion por falta de inventario",
@@ -344,6 +356,7 @@ def _rename_family_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
             "family_employment_rate": "Tasa empleo familia",
             "family_cash_available": "Efectivo disponible familia periodo",
             "family_period_income_cash": "Ingreso liquido antes de consumo",
+            "period_income_covers_basic_basket": "Ingreso periodo cubre canasta necesaria",
             "family_start_savings_cash": "Ahorro inicial antes de consumo",
             "family_cash_spent": "Gasto efectivo familia periodo",
             "family_income_spent_cash": "Ingreso usado para gasto",
@@ -377,6 +390,7 @@ def _rename_family_audit_export(frame: pd.DataFrame) -> pd.DataFrame:
         "Tasa empleo familia",
         "Efectivo disponible familia periodo",
         "Ingreso liquido antes de consumo",
+        "Ingreso periodo cubre canasta necesaria",
         "Ahorro inicial antes de consumo",
         "Gasto efectivo familia periodo",
         "Ingreso usado para gasto",
@@ -434,12 +448,18 @@ def _write_country_xlsx(
     annual: pd.DataFrame,
     firm_audit: pd.DataFrame,
     family_audit: pd.DataFrame,
+    monetary_audit: pd.DataFrame | None = None,
+    bank_audit: pd.DataFrame | None = None,
 ) -> None:
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
         monthly.to_excel(writer, sheet_name="macro_mensual", index=False)
         annual.to_excel(writer, sheet_name="macro_anual", index=False)
         _rename_firm_audit_export(firm_audit).to_excel(writer, sheet_name="auditoria_firmas", index=False)
         _rename_family_audit_export(family_audit).to_excel(writer, sheet_name="auditoria_familias", index=False)
+        if monetary_audit is not None and not monetary_audit.empty:
+            monetary_audit.to_excel(writer, sheet_name="auditoria_monetaria", index=False)
+        if bank_audit is not None and not bank_audit.empty:
+            bank_audit.to_excel(writer, sheet_name="auditoria_bancos", index=False)
 
 
 def _annualize_core_history(monthly: pd.DataFrame) -> pd.DataFrame:
@@ -1206,7 +1226,7 @@ def run_country_reports(
         if workers > 0
         else min(len(scenario_payloads), max(1, os.cpu_count() or 1))
     )
-    results: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
+    results: dict[str, tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]] = {}
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_map = {executor.submit(_run_profile, payload): payload["scenario_name"] for payload in scenario_payloads}
         for future in concurrent.futures.as_completed(future_map):
@@ -1218,6 +1238,16 @@ def run_country_reports(
                 monthly = pd.read_json(StringIO(bundle["monthly"]), orient="split")
                 firm_audit = pd.read_json(StringIO(bundle["firm_audit"]), orient="split")
                 family_audit = pd.read_json(StringIO(bundle["family_audit"]), orient="split")
+                monetary_audit = (
+                    pd.read_json(StringIO(bundle["monetary_audit"]), orient="split")
+                    if "monetary_audit" in bundle
+                    else pd.DataFrame()
+                )
+                bank_audit = (
+                    pd.read_json(StringIO(bundle["bank_audit"]), orient="split")
+                    if "bank_audit" in bundle
+                    else pd.DataFrame()
+                )
                 firm_audit = _sample_audit_entities(
                     firm_audit,
                     id_column="firm_id",
@@ -1232,7 +1262,15 @@ def run_country_reports(
                 )
                 annual = _annualize_core_history(monthly)
                 xlsx_path = output_dir / f"{slug}.xlsx"
-                _write_country_xlsx(xlsx_path, monthly, annual, firm_audit, family_audit)
+                _write_country_xlsx(
+                    xlsx_path,
+                    monthly,
+                    annual,
+                    firm_audit,
+                    family_audit,
+                    monetary_audit,
+                    bank_audit,
+                )
                 print(f"[{completed_name}] xlsx generado: {xlsx_path}", flush=True)
                 if include_csv:
                     monthly_csv_path = output_dir / f"{slug}_mensual.csv"
@@ -1240,7 +1278,7 @@ def run_country_reports(
                     monthly.to_csv(monthly_csv_path, index=False)
                     annual.to_csv(annual_csv_path, index=False)
                     print(f"[{completed_name}] csv generados: {monthly_csv_path}, {annual_csv_path}", flush=True)
-                results[completed_name] = (monthly, annual, firm_audit, family_audit)
+                results[completed_name] = (monthly, annual, firm_audit, family_audit, monetary_audit, bank_audit)
             except Exception as exc:
                 error_path = output_dir / f"{slug}_error.txt"
                 error_path.write_text(
@@ -1262,7 +1300,7 @@ def run_country_reports(
         result = results.get(scenario_name)
         if result is None:
             continue
-        monthly, annual, _firm_audit, _family_audit = result
+        monthly, annual, _firm_audit, _family_audit, _monetary_audit, _bank_audit = result
         slug = _slugify(scenario_name)
         pdf_path = output_dir / f"{slug}.pdf"
         try:

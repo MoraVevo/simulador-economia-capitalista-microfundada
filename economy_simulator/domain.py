@@ -296,6 +296,7 @@ class Firm:
     age: int = 0
     desired_workers: int = 0
     workers: list[int] = field(default_factory=list)
+    installed_worker_capacity: float = 0.0
     target_inventory: float = 0.0
     sales_this_period: float = 0.0
     stockout_rejections_this_period: float = 0.0
@@ -336,6 +337,9 @@ class Firm:
     last_capital_investment: float = 0.0
     last_industrial_investment_spending: float = 0.0
     last_investment_goods_units: float = 0.0
+    last_productivity_goods_spending: float = 0.0
+    last_capacity_goods_spending: float = 0.0
+    last_capacity_gain_workers: float = 0.0
     last_unfilled_investment_budget: float = 0.0
     last_investment_decision_reason: str = "sin_decision_registrada"
     last_technology_investment: float = 0.0
@@ -408,6 +412,9 @@ class FirmPeriodSnapshot:
     technology_gain: float
     industrial_investment_spending: float
     investment_goods_units: float
+    productivity_goods_spending: float
+    capacity_goods_spending: float
+    capacity_gain_workers: float
     unfilled_investment_budget: float
     investment_decision_reason: str
     stockout_rejected_units: float
@@ -432,6 +439,46 @@ class FirmPeriodSnapshot:
 
 
 @dataclass(frozen=True)
+class BankPeriodSnapshot:
+    period: int
+    year: int
+    period_in_year: int
+    bank_id: int
+    bank_name: str
+    active: bool
+    deposits: float
+    reserves: float
+    legal_reserve_ratio: float
+    required_reserves: float
+    excess_reserves: float
+    effective_reserve_ratio: float
+    reserve_coverage_ratio: float
+    loans_households: float
+    loans_firms: float
+    total_loans: float
+    bond_holdings: float
+    central_bank_borrowing: float
+    liquid_assets: float
+    total_assets: float
+    total_liabilities: float
+    equity: float
+    capital_ratio: float
+    leverage_ratio: float
+    loan_to_deposit_ratio: float
+    credit_deployment_ratio: float
+    funds_deployed_ratio: float
+    liquidity_ratio: float
+    deposit_rate: float
+    loan_rate: float
+    net_interest_margin: float
+    interest_income: float
+    interest_expense: float
+    profits: float
+    credit_market_share: float
+    deposit_market_share: float
+
+
+@dataclass(frozen=True)
 class FamilyPeriodSnapshot:
     period: int
     year: int
@@ -447,6 +494,7 @@ class FamilyPeriodSnapshot:
     family_employment_rate: float
     family_cash_available: float
     family_period_income_cash: float
+    period_income_covers_basic_basket: bool
     family_start_savings_cash: float
     family_cash_spent: float
     family_income_spent_cash: float
@@ -502,6 +550,8 @@ class SimulationConfig:
     firm_capital_goods_supported_workers_min: float = 4.0
     firm_capital_goods_supported_workers_max: float = 16.0
     firm_workforce_skill_investment_weight: float = 0.22
+    firm_installation_capacity_multiplier: float = 2.00
+    firm_installation_capacity_binding: bool = True
     firm_labor_full_efficiency_capital: float = 2.5
     firm_labor_diminishing_absorption: float = 0.85
     firm_investment_knowledge_floor: float = 0.90
@@ -751,6 +801,7 @@ class SimulationConfig:
     initial_private_university_firms: int = 1
     track_firm_history: bool = False
     track_family_history: bool = False
+    track_bank_history: bool = False
 
 
 @dataclass
@@ -989,3 +1040,4 @@ class SimulationResult:
     banks: list[CommercialBank]
     government: Government
     family_history: list[FamilyPeriodSnapshot] = field(default_factory=list)
+    bank_history: list[BankPeriodSnapshot] = field(default_factory=list)
