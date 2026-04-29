@@ -34,6 +34,7 @@ ARRAY_BACKED_SECTOR_KEYS = ("food", "housing", "clothing", "manufactured", "leis
 ARRAY_BACKED_SECTOR_INDEX = {sector_key: index for index, sector_key in enumerate(ARRAY_BACKED_SECTOR_KEYS)}
 MERIT_SECTOR_KEYS = ("school", "university")
 PURE_DISCRETIONARY_SECTOR_KEYS = ("leisure",)
+POST_BASIC_WELLBEING_SECTOR_KEYS = PURE_DISCRETIONARY_SECTOR_KEYS + MERIT_SECTOR_KEYS
 
 
 class EconomySimulation:
@@ -434,6 +435,7 @@ class EconomySimulation:
             firm.last_investment_decision_reason = "sin_decision_registrada"
             firm.last_technology_investment = 0.0
             firm.last_technology_gain = 0.0
+            firm.last_rd_investment_spending = 0.0
 
     def _refresh_period_household_caches(self) -> None:
         self._period_active_households_cache = [household for household in self.households if household.alive]
@@ -2430,6 +2432,180 @@ class EconomySimulation:
         ) * max(0.0, self.config.firm_workforce_skill_investment_weight)
         return clamp(0.94 + skill_bonus, 0.85, 1.35)
 
+    def _firm_rd_return_signal(
+        self,
+        firm: Firm,
+        *,
+        investment_confidence: float,
+        growth_signal: float,
+        excess_cash_ratio: float,
+    ) -> float:
+        if not firm.active:
+            return 0.0
+        technology_room = clamp(
+            (self.config.technology_cap - firm.technology)
+            / max(0.1, self.config.technology_cap - 0.75),
+            0.0,
+            1.0,
+        )
+        if technology_room <= 0.02:
+            return 0.0
+        profit_margin = clamp(firm.last_profit / max(1.0, firm.last_revenue), -0.35, 0.45)
+        labor_gap = max(0.0, firm.desired_workers - len(firm.workers)) / max(1.0, firm.desired_workers)
+        cost_pressure = 0.0
+        if firm.last_effective_marginal_unit_cost > 0.0:
+            cost_pressure = clamp(
+                firm.last_effective_marginal_unit_cost / max(0.1, firm.price) - 0.62,
+                0.0,
+                0.80,
+            )
+        shortage_pressure = max(
+            self._firm_stockout_pressure(firm),
+            self._firm_sold_out_capacity_pressure(firm),
+        )
+        expected_profitability = clamp(
+            0.65 * max(0.0, profit_margin)
+            + 0.24 * max(0.0, growth_signal)
+            + 0.20 * shortage_pressure
+            + 0.16 * labor_gap
+            + 0.14 * cost_pressure,
+            0.0,
+            1.35,
+        )
+        liquidity_holguera = clamp(excess_cash_ratio / 2.2, 0.0, 1.0)
+        uncertainty_drag = 0.22 * self._firm_forecast_uncertainty(firm)
+        signal = (
+            0.36 * expected_profitability
+            + 0.28 * liquidity_holguera
+            + 0.20 * clamp(investment_confidence - 0.75, 0.0, 0.80)
+            + 0.16 * self._firm_workforce_skill_multiplier(firm)
+            - uncertainty_drag
+        )
+        return clamp(signal * (0.35 + 0.65 * technology_room), 0.0, 1.50)
+
+    def _firm_desired_rd_budget(
+        self,
+        firm: Firm,
+        *,
+        revenue: float,
+        investment_cap: float,
+        rd_return_signal: float,
+        excess_cash_ratio: float,
+    ) -> float:
+        if investment_cap <= 0.0 or rd_return_signal < self.config.rd_min_return_signal:
+            return 0.0
+        technology_room = clamp(
+            (self.config.technology_cap - firm.technology)
+            / max(0.1, self.config.technology_cap - 0.75),
+            0.0,
+            1.0,
+        )
+        if technology_room <= 0.02:
+            return 0.0
+        signal = clamp(rd_return_signal, 0.0, 1.0)
+        revenue_budget = max(0.0, revenue) * max(0.0, self.config.rd_investment_revenue_share_max)
+        liquidity_budget = investment_cap * max(0.0, self.config.rd_investment_excess_cash_share_max)
+        liquidity_budget *= clamp(excess_cash_ratio / 2.0, 0.0, 1.25)
+        desired_budget = (revenue_budget + liquidity_budget) * signal * (0.45 + 0.55 * technology_room)
+        return min(
+            max(0.0, desired_budget),
+            investment_cap * clamp(self.config.rd_investment_cap_share, 0.0, 1.0),
+        )
+
+    def _distribute_rd_labor_income(self, amount: float) -> float:
+        amount = max(0.0, amount)
+        if amount <= 0.0:
+            return 0.0
+        recipients = self._public_education_payroll_recipients("university")
+        if not recipients:
+            return self._distribute_government_spending_leakage(amount)
+        transfer_per_recipient = amount / max(1, len(recipients))
+        for household in recipients:
+            household.savings += transfer_per_recipient
+        return amount
+
+    def _execute_firm_rd_investment(
+        self,
+        firm: Firm,
+        budget: float,
+        *,
+        rd_return_signal: float,
+    ) -> float:
+        budget = max(0.0, budget)
+        if budget <= 0.0 or not firm.active:
+            return 0.0
+        spending = min(budget, max(0.0, firm.cash))
+        if spending <= 0.0:
+            return 0.0
+        firm.cash -= spending
+
+        university_share = clamp(self.config.rd_university_service_share, 0.0, 1.0)
+        skilled_share = clamp(self.config.rd_skilled_labor_share, 0.0, max(0.0, 1.0 - university_share))
+        university_spending = spending * university_share
+        skilled_spending = spending * skilled_share
+        leakage = max(0.0, spending - university_spending - skilled_spending)
+        if university_spending > 0.0:
+            self._distribute_payment_to_sector(
+                "university",
+                university_spending,
+                book_profit=True,
+                track_operating_cost=True,
+            )
+        if skilled_spending > 0.0:
+            self._distribute_rd_labor_income(skilled_spending)
+        if leakage > 0.0:
+            self._distribute_government_spending_leakage(leakage)
+
+        skill_multiplier = self._firm_workforce_skill_multiplier(firm)
+        technology_room = clamp(
+            (self.config.technology_cap - firm.technology)
+            / max(0.1, self.config.technology_cap - 0.75),
+            0.0,
+            1.0,
+        )
+        rd_intensity = spending / max(
+            1.0,
+            firm.last_wage_bill + firm.last_fixed_overhead + 0.06 * firm.capital + 1.0,
+        )
+        knowledge_efficiency = clamp(
+            self._investment_knowledge_multiplier() * skill_multiplier * (0.70 + 0.30 * rd_return_signal),
+            0.55,
+            1.65,
+        )
+        technology_gain = (
+            max(0.0, self.config.rd_technology_gain_max)
+            * math.log1p(rd_intensity)
+            * technology_room
+            * knowledge_efficiency
+        )
+        productivity_gain = (
+            max(0.0, self.config.rd_productivity_gain_max)
+            * math.log1p(rd_intensity)
+            * technology_room
+            * knowledge_efficiency
+        )
+        firm.technology = clamp(
+            firm.technology * (1.0 + technology_gain),
+            0.75,
+            self.config.technology_cap,
+        )
+        firm.productivity = max(0.005, firm.productivity * (1.0 + productivity_gain))
+        capacity_gain_workers = (
+            max(0.0, self.config.rd_capacity_gain_worker_share)
+            * spending
+            / max(1.0, firm.wage_offer * max(1.0, self.config.manufactured_full_capacity_workers))
+            * knowledge_efficiency
+        )
+        if capacity_gain_workers > 0.0:
+            firm.installed_worker_capacity += capacity_gain_workers
+
+        firm.last_rd_investment_spending += spending
+        firm.last_technology_investment += spending
+        firm.last_technology_gain += technology_gain
+        firm.last_capacity_gain_workers += capacity_gain_workers
+        self._period_investment_spending += spending
+        return spending
+
     def _firm_growth_investment_signal(
         self,
         firm: Firm,
@@ -4413,6 +4589,7 @@ class EconomySimulation:
                 supplier.sales_history[-1] = max(0.0, supplier.last_sales)
             if supplier.observed_demand_history:
                 supplier.observed_demand_history[-1] = max(0.0, supplier.last_observed_demand)
+            self._apply_implied_sold_out_signal(supplier, sync_history=True)
             self._period_sales_units += units
             self._period_sector_sales_units["manufactured"] += units
             self._book_post_settlement_revenue(supplier, spend)
@@ -4421,6 +4598,14 @@ class EconomySimulation:
 
     def _capital_goods_market_diagnostic(self, buyer: Firm, budget: float) -> str:
         budget = max(0.0, budget)
+        cheapest_unit = self._minimum_available_capital_goods_unit_price(buyer)
+        if cheapest_unit is None:
+            return "no_habia_maquinaria_disponible"
+        if budget < cheapest_unit:
+            return "presupuesto_no_alcanzo_para_unidad_minima_maquinaria"
+        return "habia_maquinaria_disponible"
+
+    def _minimum_available_capital_goods_unit_price(self, buyer: Firm) -> float | None:
         suppliers = [
             firm
             for firm in self._sector_firms("manufactured")
@@ -4429,11 +4614,8 @@ class EconomySimulation:
             and self._manufacturing_capital_goods_available_units(firm) > 0.0
         ]
         if not suppliers:
-            return "no_habia_maquinaria_disponible"
-        cheapest_unit = min(self._capital_goods_unit_price(firm) for firm in suppliers)
-        if budget < cheapest_unit:
-            return "presupuesto_no_alcanzo_para_unidad_minima_maquinaria"
-        return "habia_maquinaria_disponible"
+            return None
+        return min(self._capital_goods_unit_price(firm) for firm in suppliers)
 
     def _flush_pending_sector_payments(self) -> None:
         pending_payments = self._pending_sector_payments.copy()
@@ -4856,6 +5038,8 @@ class EconomySimulation:
 
     def _essential_extra_budget_share(self, essential_coverage: float) -> float:
         essential_coverage = max(0.0, essential_coverage)
+        if essential_coverage < 0.995:
+            return 1.0
         return clamp(0.60 * math.exp(-4.0 * max(0.0, essential_coverage - 1.0)), 0.05, 0.60)
 
     def _coverage_saturation(self, coverage_ratio: float, intensity: float = 2.0) -> float:
@@ -4880,10 +5064,35 @@ class EconomySimulation:
             weighted_coverage += target_units * sector_coverage
         return clamp(weighted_coverage / total_target, 0.0, 3.0)
 
+    def _family_post_basic_satisfaction(
+        self,
+        target_units_by_sector: dict[str, float],
+        purchased_units_by_sector: dict[str, float],
+    ) -> float:
+        coverages: list[float] = []
+        for sector_key in POST_BASIC_WELLBEING_SECTOR_KEYS:
+            target_units = max(0.0, target_units_by_sector.get(sector_key, 0.0))
+            if target_units <= 1e-9:
+                continue
+            purchased_units = max(0.0, purchased_units_by_sector.get(sector_key, 0.0))
+            coverages.append(clamp(purchased_units / target_units, 0.0, 1.0))
+        if not coverages:
+            return 0.0
+        average_depth = sum(self._coverage_saturation(coverage, intensity=1.6) for coverage in coverages) / len(coverages)
+        breadth = sum(1.0 for coverage in coverages if coverage >= 0.35) / len(coverages)
+        return clamp(0.58 * average_depth + 0.42 * breadth, 0.0, 1.0)
+
     def _extra_essential_gap_units(self, target_units: float, purchased_units: float) -> float:
         if target_units <= 0.0:
             return 0.0
         coverage_cap = max(1.0, self.config.extra_essential_coverage_cap)
+        capped_target_units = target_units * coverage_cap
+        return max(0.0, capped_target_units - max(0.0, purchased_units))
+
+    def _post_basic_gap_units(self, target_units: float, purchased_units: float) -> float:
+        if target_units <= 0.0:
+            return 0.0
+        coverage_cap = max(1.0, self.config.post_basic_discretionary_coverage_cap)
         capped_target_units = target_units * coverage_cap
         return max(0.0, capped_target_units - max(0.0, purchased_units))
 
@@ -4961,7 +5170,16 @@ class EconomySimulation:
             neutral_spend = budget_neutral * share
             intended_spend = budget_effective * share
             average_price = self._average_sector_price(sector_key)
-            desired_units = intended_spend / max(0.1, average_price)
+            remaining_gap_units = self._post_basic_gap_units(
+                sector_preference_units.get(sector_key, 0.0),
+                purchased_units_by_sector.get(sector_key, 0.0),
+            )
+            desired_units = min(
+                intended_spend / max(0.1, average_price),
+                remaining_gap_units,
+            )
+            if desired_units <= 0.0:
+                continue
             desired_units_neutral = neutral_spend / max(0.1, spec.base_price)
             self._period_potential_demand_units += desired_units
             self._period_sector_potential_demand_units[sector_key] += desired_units
@@ -5899,8 +6117,12 @@ class EconomySimulation:
         production_reference = max(1.0, firm.last_production, self._smoothed_production_reference(firm))
         installed_capacity = max(1.0, self._firm_installed_production_capacity_units(firm))
         sold_output = firm.last_sales >= 0.90 * production_reference
+        sold_current_output = (
+            firm.last_production > 0.0
+            and firm.last_sales >= 0.98 * max(1.0, firm.last_production)
+        )
         saturated_capacity = firm.last_production >= 0.86 * installed_capacity
-        if not (sold_output or saturated_capacity):
+        if not (sold_output or sold_current_output or saturated_capacity):
             return 0.0
         direct_shortage_units = max(
             0.0,
@@ -5915,13 +6137,20 @@ class EconomySimulation:
             )
             direct_shortage_units = firm.last_competitive_demand_rejections * displacement_visibility
         shortage_units = direct_shortage_units
-        if shortage_units <= 1e-9 and firm.last_sales >= 0.98 * max(1.0, firm.last_expected_sales):
+        if shortage_units <= 1e-9 and (
+            firm.last_sales >= 0.98 * max(1.0, firm.last_expected_sales)
+            or sold_current_output
+        ):
             fallback_share = 0.18
             if firm.sector == "manufactured":
                 fallback_share = 0.35
             elif firm.sector in ESSENTIAL_SECTOR_KEYS:
                 fallback_share = 0.24
-            shortage_units = fallback_share * firm.last_sales
+            expected_gap_units = max(0.0, firm.last_expected_sales - firm.last_sales)
+            shortage_units = max(
+                fallback_share * firm.last_sales,
+                min(expected_gap_units, 1.50 * max(1.0, firm.last_sales)),
+            )
         return clamp(shortage_units, 0.0, max(1.0, 2.50 * firm.last_sales))
 
     def _firm_sold_out_capacity_pressure(self, firm: Firm) -> float:
@@ -5929,6 +6158,25 @@ class EconomySimulation:
         if shortage_units <= 0.0:
             return 0.0
         return clamp(shortage_units / max(1.0, firm.last_sales + shortage_units), 0.0, 1.5)
+
+    def _apply_implied_sold_out_signal(self, firm: Firm, *, sync_history: bool = False) -> None:
+        implied_stockout_rejections = self._firm_sold_out_capacity_shortage_units(firm)
+        if implied_stockout_rejections > firm.last_stockout_rejections:
+            firm.last_stockout_rejections = implied_stockout_rejections
+            firm.last_observed_demand = max(
+                firm.last_observed_demand,
+                firm.last_sales + firm.last_stockout_rejections,
+            )
+        firm.last_stockout_pressure = clamp(
+            firm.last_stockout_rejections / max(1.0, firm.last_observed_demand),
+            0.0,
+            1.5,
+        )
+        if sync_history:
+            if firm.observed_demand_history:
+                firm.observed_demand_history[-1] = max(0.0, firm.last_observed_demand)
+            if firm.stockout_rejection_history:
+                firm.stockout_rejection_history[-1] = max(0.0, firm.last_stockout_rejections)
 
     def _firm_stockout_pressure(self, firm: Firm) -> float:
         effective_stockout_rejections = max(
@@ -11017,6 +11265,8 @@ class EconomySimulation:
         *,
         family_cash: float,
         family_basic_basket_cost: float,
+        essential_coverage: float,
+        post_basic_satisfaction: float,
         family_price_sensitivity: float,
         family_saving_propensity: float,
         family_consumption_multiplier: float,
@@ -11102,6 +11352,21 @@ class EconomySimulation:
                 0.22,
             )
             savings_rate *= post_cushion_scale
+        essential_gap = clamp(1.0 - essential_coverage, 0.0, 1.0)
+        if essential_gap > 0.0:
+            savings_rate *= clamp(0.02 + 0.08 * essential_coverage, 0.02, 0.10)
+        else:
+            post_basic_comfort = clamp(
+                residual_after_floor / max(1.0, family_basic_basket_cost),
+                0.0,
+                1.0,
+            )
+            post_basic_readiness = clamp(
+                0.55 * post_basic_satisfaction + 0.45 * post_basic_comfort,
+                0.0,
+                1.0,
+            )
+            savings_rate *= clamp(0.08 + 0.92 * post_basic_readiness, 0.08, 1.0)
         return clamp(savings_rate, 0.0, 0.45)
 
     def _advance_household_education(self, household: Household) -> None:
@@ -11503,10 +11768,25 @@ class EconomySimulation:
                 )
                 purchased_units_by_sector[sector_key] += units_bought
 
+            post_basic_target_by_sector = {
+                sector_key: sum(
+                    member_target_units_by_sector[member.id][sector_key]
+                    for member in family_members
+                )
+                for sector_key in POST_BASIC_WELLBEING_SECTOR_KEYS
+            }
+            post_basic_satisfaction = self._family_post_basic_satisfaction(
+                post_basic_target_by_sector,
+                purchased_units_by_sector,
+            )
             target_savings_rate = self._family_savings_rate(
                 family_members,
                 family_cash=cash,
                 family_basic_basket_cost=family_basic_basket_cost,
+                essential_coverage=(
+                    essential_units_bought / essential_target_units if essential_target_units > 0.0 else 1.0
+                ),
+                post_basic_satisfaction=post_basic_satisfaction,
                 family_price_sensitivity=family_price_sensitivity,
                 family_saving_propensity=family_saving_propensity,
                 family_consumption_multiplier=family_consumption_multiplier,
@@ -11614,7 +11894,7 @@ class EconomySimulation:
                 )
 
             family_remaining_cash = max(0.0, cash)
-            unmet_basic_essentials = max(0.0, essential_target_units - baseline_essential_units_bought)
+            unmet_basic_essentials = max(0.0, essential_target_units - essential_units_bought)
             involuntary_retained_cash = (
                 family_remaining_cash
                 if unmet_basic_essentials > 1e-9 and family_remaining_cash > 0.0
@@ -11860,7 +12140,7 @@ class EconomySimulation:
 
     def _settle_firms(self) -> None:
         planned_dividends: list[tuple[Firm, Entrepreneur, float]] = []
-        planned_investments: list[tuple[Firm, float, float, float, str]] = []
+        planned_investments: list[tuple[Firm, float, float, float, str, float, float]] = []
 
         for firm in self.firms:
             if not firm.active:
@@ -11888,18 +12168,7 @@ class EconomySimulation:
                 + firm.last_competitive_demand_rejections
                 + firm.last_capacity_shortage_rejections
             )
-            implied_stockout_rejections = self._firm_sold_out_capacity_shortage_units(firm)
-            if implied_stockout_rejections > firm.last_stockout_rejections:
-                firm.last_stockout_rejections = implied_stockout_rejections
-                firm.last_observed_demand = max(
-                    firm.last_observed_demand,
-                    firm.last_sales + firm.last_stockout_rejections,
-                )
-            firm.last_stockout_pressure = clamp(
-                firm.last_stockout_rejections / max(1.0, firm.last_observed_demand),
-                0.0,
-                1.5,
-            )
+            self._apply_implied_sold_out_signal(firm)
             firm.sales_history.append(firm.last_sales)
             firm.observed_demand_history.append(firm.last_observed_demand)
             firm.stockout_rejection_history.append(firm.last_stockout_rejections)
@@ -12018,8 +12287,43 @@ class EconomySimulation:
                     revealed_growth_pressure=revealed_growth_pressure,
                     interest_drag=interest_drag,
                 )
-                desired_investment = max(profit_funded_investment, capital_goods_budget)
-                investment = min(max(profit_funded_investment, capital_goods_budget), investment_cap)
+                growth_signal = self._firm_growth_investment_signal(
+                    firm,
+                    sell_through=sell_through,
+                    revealed_growth_pressure=revealed_growth_pressure,
+                )
+                rd_return_signal = self._firm_rd_return_signal(
+                    firm,
+                    investment_confidence=investment_confidence,
+                    growth_signal=growth_signal,
+                    excess_cash_ratio=excess_cash_ratio,
+                )
+                rd_budget = self._firm_desired_rd_budget(
+                    firm,
+                    revenue=revenue,
+                    investment_cap=investment_cap,
+                    rd_return_signal=rd_return_signal,
+                    excess_cash_ratio=excess_cash_ratio,
+                )
+                minimum_unit_price = self._minimum_available_capital_goods_unit_price(firm)
+                if (
+                    minimum_unit_price is not None
+                    and investment_cap >= minimum_unit_price
+                    and max(
+                        growth_signal,
+                        revealed_growth_pressure,
+                        self._firm_sold_out_capacity_pressure(firm),
+                    )
+                    >= 0.08
+                ):
+                    capital_goods_budget = max(capital_goods_budget, minimum_unit_price)
+                physical_investment_request = max(profit_funded_investment, capital_goods_budget)
+                desired_investment = min(
+                    investment_cap,
+                    physical_investment_request + rd_budget,
+                )
+                physical_investment = min(physical_investment_request, desired_investment)
+                rd_budget = min(rd_budget, max(0.0, desired_investment - physical_investment))
                 if desired_investment <= 1e-9:
                     if capital_goods_budget <= 1e-9 and profit_funded_investment <= 1e-9:
                         firm.last_investment_decision_reason = "no_vio_senal_suficiente_para_invertir"
@@ -12027,29 +12331,31 @@ class EconomySimulation:
                         firm.last_investment_decision_reason = "sin_utilidad_o_presupuesto_productivo"
                 elif investment_cap <= 1e-9:
                     firm.last_investment_decision_reason = "liquidez_reservada_insuficiente_para_invertir"
-                elif investment <= 1e-9:
+                elif desired_investment <= 1e-9:
                     firm.last_investment_decision_reason = "restriccion_financiera_impidio_invertir"
                 else:
-                    firm.last_investment_decision_reason = "planeo_comprar_maquinaria"
-                    growth_signal = self._firm_growth_investment_signal(
-                        firm,
-                        sell_through=sell_through,
-                        revealed_growth_pressure=revealed_growth_pressure,
-                    )
+                    firm.last_investment_decision_reason = "planeo_inversion_productiva"
                     product_a_share, product_b_share, mix_reason = self._firm_industrial_goods_mix(
                         firm,
                         growth_signal=max(growth_signal, revealed_growth_pressure),
                     )
-                    technology_investment = investment * product_a_share
-                    capital_investment = investment * product_b_share
-                    firm.last_investment_decision_reason = f"planeo_comprar_maquinaria_{mix_reason}"
+                    technology_investment = physical_investment * product_a_share
+                    capital_investment = physical_investment * product_b_share
+                    if physical_investment > 0.0 and rd_budget > 0.0:
+                        firm.last_investment_decision_reason = f"planeo_maquinaria_e_ID_{mix_reason}"
+                    elif rd_budget > 0.0:
+                        firm.last_investment_decision_reason = "planeo_ID_intangible_por_retorno_esperado"
+                    else:
+                        firm.last_investment_decision_reason = f"planeo_comprar_maquinaria_{mix_reason}"
                     planned_investments.append(
                         (
                             firm,
-                            investment,
+                            physical_investment,
                             capital_investment,
                             technology_investment,
                             mix_reason,
+                            rd_budget,
+                            rd_return_signal,
                         )
                     )
             else:
@@ -12077,102 +12383,119 @@ class EconomySimulation:
         self._collect_government_wealth_tax()
 
         investment_knowledge_multiplier = self._investment_knowledge_multiplier()
-        for firm, investment, capital_investment, technology_investment, mix_reason in planned_investments:
+        for firm, investment, capital_investment, technology_investment, mix_reason, rd_budget, rd_return_signal in planned_investments:
             available_budget = min(investment, max(0.0, firm.cash))
-            if available_budget <= 0.0:
-                firm.last_investment_decision_reason = "liquidez_desaparecio_antes_de_comprar_maquinaria"
-                continue
-            industrial_spending, goods_units, supplier_quality, capital_service_value = self._purchase_industrial_investment_goods(
-                firm,
-                available_budget,
-            )
-            firm.last_unfilled_investment_budget = max(0.0, available_budget - industrial_spending)
-            if industrial_spending <= 0.0:
-                firm.last_investment_decision_reason = self._capital_goods_market_diagnostic(
+            industrial_spending = 0.0
+            goods_units = 0.0
+            if available_budget > 0.0:
+                industrial_spending, goods_units, supplier_quality, capital_service_value = self._purchase_industrial_investment_goods(
                     firm,
                     available_budget,
                 )
-                continue
-            if firm.last_unfilled_investment_budget > max(1.0, 0.05 * available_budget):
-                firm.last_investment_decision_reason = self._capital_goods_market_diagnostic(
-                    firm,
-                    firm.last_unfilled_investment_budget,
-                )
-                if firm.last_investment_decision_reason == "habia_maquinaria_disponible":
-                    firm.last_investment_decision_reason = "compro_parcialmente_maquinaria"
-            else:
-                firm.last_investment_decision_reason = f"invirtio_en_maquinaria_{mix_reason}"
-            capital_share = capital_investment / investment if investment > 0.0 else 0.0
-            productivity_share = technology_investment / investment if investment > 0.0 else 0.0
-            product_a_spending = industrial_spending * productivity_share
-            product_b_spending = industrial_spending * capital_share
-            firm_skill_multiplier = self._firm_workforce_skill_multiplier(firm)
-            investment_quality_multiplier = (
-                investment_knowledge_multiplier
-                * supplier_quality
-                * firm_skill_multiplier
+                firm.last_unfilled_investment_budget = max(0.0, available_budget - industrial_spending)
+                if industrial_spending <= 0.0:
+                    firm.last_investment_decision_reason = self._capital_goods_market_diagnostic(
+                        firm,
+                        available_budget,
+                    )
+                elif firm.last_unfilled_investment_budget > max(1.0, 0.05 * available_budget):
+                    firm.last_investment_decision_reason = self._capital_goods_market_diagnostic(
+                        firm,
+                        firm.last_unfilled_investment_budget,
+                    )
+                    if firm.last_investment_decision_reason == "habia_maquinaria_disponible":
+                        firm.last_investment_decision_reason = "compro_parcialmente_maquinaria"
+                else:
+                    firm.last_investment_decision_reason = f"invirtio_en_maquinaria_{mix_reason}"
+                if industrial_spending > 0.0:
+                    capital_share = capital_investment / investment if investment > 0.0 else 0.0
+                    productivity_share = technology_investment / investment if investment > 0.0 else 0.0
+                    product_a_spending = industrial_spending * productivity_share
+                    product_b_spending = industrial_spending * capital_share
+                    firm_skill_multiplier = self._firm_workforce_skill_multiplier(firm)
+                    investment_quality_multiplier = (
+                        investment_knowledge_multiplier
+                        * supplier_quality
+                        * firm_skill_multiplier
+                    )
+                    raw_capital_investment = industrial_spending * capital_share * investment_quality_multiplier
+                    actual_capital_investment = min(raw_capital_investment, capital_service_value * max(0.0, capital_share))
+                    actual_technology_investment = (
+                        industrial_spending * (1.0 - capital_share) * investment_quality_multiplier
+                    )
+                    firm.cash -= industrial_spending
+                    firm.capital += actual_capital_investment
+                    capacity_gain_workers = 0.0
+                    if capital_share > 0.0 and capital_service_value > 0.0:
+                        full_efficiency_capital = (
+                            1.0
+                            if firm.sector == "manufactured"
+                            else max(0.1, self.config.firm_labor_full_efficiency_capital)
+                        )
+                        capacity_gain_workers = (
+                            capital_service_value
+                            * max(0.0, capital_share)
+                            / full_efficiency_capital
+                        )
+                        firm.installed_worker_capacity = max(
+                            firm.installed_worker_capacity,
+                            firm.installed_worker_capacity + max(0.0, capacity_gain_workers),
+                        )
+                    firm.technology = clamp(
+                        firm.technology * (1.0 - self.config.technology_depreciation_rate),
+                        0.75,
+                        self.config.technology_cap,
+                    )
+                    technology_boost = self.rng.uniform(
+                        self.config.technology_gain_min,
+                        self.config.technology_gain_max,
+                    )
+                    technology_room = clamp(
+                        (self.config.technology_cap - firm.technology)
+                        / max(0.1, self.config.technology_cap - 0.75),
+                        0.0,
+                        1.0,
+                    )
+                    technology_intensity = actual_technology_investment / max(
+                        1.0,
+                        firm.last_wage_bill + firm.last_fixed_overhead + 0.08 * firm.capital + 1.0,
+                    )
+                    technology_gain = (
+                        technology_boost
+                        * math.log1p(max(0.0, technology_intensity))
+                        * (0.35 + 0.65 * technology_room)
+                    )
+                    firm.technology = clamp(
+                        firm.technology * (1.0 + technology_gain),
+                        0.75,
+                        self.config.technology_cap,
+                    )
+                    firm.last_capital_investment = actual_capital_investment
+                    firm.last_industrial_investment_spending = industrial_spending
+                    firm.last_investment_goods_units = goods_units
+                    firm.last_productivity_goods_spending = product_a_spending
+                    firm.last_capacity_goods_spending = product_b_spending
+                    firm.last_capacity_gain_workers = capacity_gain_workers
+                    firm.last_technology_investment = actual_technology_investment
+                    firm.last_technology_gain = technology_gain
+                    self._period_investment_spending += industrial_spending
+            unfilled_budget = max(0.0, available_budget - industrial_spending)
+            rd_fallback = 0.0
+            if rd_return_signal >= self.config.rd_min_return_signal:
+                rd_fallback = unfilled_budget * max(0.0, self.config.rd_unfilled_capital_budget_fallback_share)
+            rd_available = min(max(0.0, rd_budget + rd_fallback), max(0.0, firm.cash))
+            rd_spending = self._execute_firm_rd_investment(
+                firm,
+                rd_available,
+                rd_return_signal=rd_return_signal,
             )
-            raw_capital_investment = industrial_spending * capital_share * investment_quality_multiplier
-            actual_capital_investment = min(raw_capital_investment, capital_service_value * max(0.0, capital_share))
-            actual_technology_investment = (
-                industrial_spending * (1.0 - capital_share) * investment_quality_multiplier
-            )
-            firm.cash -= industrial_spending
-            firm.capital += actual_capital_investment
-            capacity_gain_workers = 0.0
-            if capital_share > 0.0 and capital_service_value > 0.0:
-                full_efficiency_capital = (
-                    1.0
-                    if firm.sector == "manufactured"
-                    else max(0.1, self.config.firm_labor_full_efficiency_capital)
-                )
-                capacity_gain_workers = (
-                    capital_service_value
-                    * max(0.0, capital_share)
-                    / full_efficiency_capital
-                )
-                firm.installed_worker_capacity = max(
-                    firm.installed_worker_capacity,
-                    firm.installed_worker_capacity + max(0.0, capacity_gain_workers),
-                )
-            firm.technology = clamp(
-                firm.technology * (1.0 - self.config.technology_depreciation_rate),
-                0.75,
-                self.config.technology_cap,
-            )
-            technology_boost = self.rng.uniform(
-                self.config.technology_gain_min,
-                self.config.technology_gain_max,
-            )
-            technology_room = clamp(
-                (self.config.technology_cap - firm.technology)
-                / max(0.1, self.config.technology_cap - 0.75),
-                0.0,
-                1.0,
-            )
-            technology_intensity = actual_technology_investment / max(
-                1.0,
-                firm.last_wage_bill + firm.last_fixed_overhead + 0.08 * firm.capital + 1.0,
-            )
-            technology_gain = (
-                technology_boost
-                * math.log1p(max(0.0, technology_intensity))
-                * (0.35 + 0.65 * technology_room)
-            )
-            firm.technology = clamp(
-                firm.technology * (1.0 + technology_gain),
-                0.75,
-                self.config.technology_cap,
-            )
-            firm.last_capital_investment = actual_capital_investment
-            firm.last_industrial_investment_spending = industrial_spending
-            firm.last_investment_goods_units = goods_units
-            firm.last_productivity_goods_spending = product_a_spending
-            firm.last_capacity_goods_spending = product_b_spending
-            firm.last_capacity_gain_workers = capacity_gain_workers
-            firm.last_technology_investment = actual_technology_investment
-            firm.last_technology_gain = technology_gain
-            self._period_investment_spending += industrial_spending
+            if rd_spending > 0.0:
+                if industrial_spending > 0.0:
+                    firm.last_investment_decision_reason += "_mas_ID_intangible"
+                else:
+                    firm.last_investment_decision_reason = "invirtio_en_ID_intangible_por_retorno_esperado"
+            elif available_budget <= 0.0 and rd_budget > 0.0:
+                firm.last_investment_decision_reason = "liquidez_desaparecio_antes_de_invertir_en_ID"
 
         for firm in self.firms:
             if not firm.active:
@@ -12289,6 +12612,7 @@ class EconomySimulation:
             firm.last_investment_decision_reason = "firma_inactiva"
             firm.last_technology_investment = 0.0
             firm.last_technology_gain = 0.0
+            firm.last_rd_investment_spending = 0.0
             firm.last_interest_cost = 0.0
             firm.labor_offer_rejections = 0
             firm.labor_offer_rejection_wage_floor = 0.0
@@ -12645,6 +12969,7 @@ class EconomySimulation:
         firm.last_investment_decision_reason = "empresa_nueva_sin_decision_previa"
         firm.last_technology_investment = 0.0
         firm.last_technology_gain = 0.0
+        firm.last_rd_investment_spending = 0.0
         firm.last_stockout_rejections = 0.0
         firm.last_competitive_demand_rejections = 0.0
         firm.last_capacity_shortage_rejections = 0.0
@@ -13475,6 +13800,7 @@ class EconomySimulation:
                     capital_investment=firm.last_capital_investment,
                     technology_investment=firm.last_technology_investment,
                     technology_gain=firm.last_technology_gain,
+                    rd_investment_spending=firm.last_rd_investment_spending,
                     industrial_investment_spending=firm.last_industrial_investment_spending,
                     investment_goods_units=firm.last_investment_goods_units,
                     productivity_goods_spending=firm.last_productivity_goods_spending,
@@ -13625,11 +13951,13 @@ class EconomySimulation:
             return "no_alcanzo_el_efectivo_disponible"
 
         shortfall_value = needed_value * max(0.0, 1.0 - coverage_ratio)
-        if family_voluntary_saved_cash > shortfall_value * 0.25:
+        if shortfall_value <= 1e-9:
+            return "friccion_o_preferencia_no_comprar"
+        if family_voluntary_saved_cash >= shortfall_value * 0.98:
             return "decidieron_ahorrar_o_no_comprar"
-        if family_involuntary_retained_cash > shortfall_value * 0.25:
+        if family_involuntary_retained_cash >= shortfall_value * 0.98:
             return "retencion_involuntaria_no_gastada"
-        return "friccion_o_preferencia_no_comprar"
+        return "presupuesto_asignado_insuficiente_a_basicos"
 
     def _build_family_period_snapshots(self) -> list[FamilyPeriodSnapshot]:
         self._refresh_period_household_caches()

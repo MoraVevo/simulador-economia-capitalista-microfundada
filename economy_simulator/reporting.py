@@ -1002,6 +1002,7 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "stockout_pressure": pd.Series([0.0] * len(audit), index=audit.index),
         "capital_investment": pd.Series([0.0] * len(audit), index=audit.index),
         "technology_investment": pd.Series([0.0] * len(audit), index=audit.index),
+        "rd_investment_spending": pd.Series([0.0] * len(audit), index=audit.index),
         "industrial_investment_spending": pd.Series([0.0] * len(audit), index=audit.index),
         "investment_goods_units": pd.Series([0.0] * len(audit), index=audit.index),
         "productivity_goods_spending": pd.Series([0.0] * len(audit), index=audit.index),
@@ -1032,14 +1033,34 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
     audit["price_to_marginal_unit_cost_ratio"] = audit["price"] / audit["effective_marginal_unit_cost"].clip(lower=0.1)
     audit["sales_realization_ratio"] = audit["sales"] / audit["expected_sales"].clip(lower=1.0)
     revenue_base = audit["revenue"].clip(lower=1.0)
-    liquidity_base = (audit["cash"].clip(lower=0.0) + audit["industrial_investment_spending"]).clip(lower=1.0)
+    tangible_and_rd_investment = (
+        audit["industrial_investment_spending"].clip(lower=0.0)
+        + audit["rd_investment_spending"].clip(lower=0.0)
+    )
+    liquidity_base = (audit["cash"].clip(lower=0.0) + tangible_and_rd_investment).clip(lower=1.0)
     audit["productivity_investment_propensity"] = audit["technology_investment"] / revenue_base
-    audit["total_investment_propensity"] = audit["industrial_investment_spending"] / revenue_base
-    audit["liquidity_reinvestment_rate"] = audit["industrial_investment_spending"] / liquidity_base
+    audit["total_investment_propensity"] = tangible_and_rd_investment / revenue_base
+    audit["liquidity_reinvestment_rate"] = tangible_and_rd_investment / liquidity_base
+    audit["period_total_spending_outflow"] = (
+        audit["total_cost"].clip(lower=0.0)
+        + tangible_and_rd_investment
+    )
+    period_money_base = (
+        audit["period_total_spending_outflow"]
+        + audit["cash"].clip(lower=0.0)
+    ).clip(lower=1e-9)
+    audit["firm_period_marginal_propensity_to_spend"] = (
+        audit["period_total_spending_outflow"] / period_money_base
+    )
+    audit["firm_period_propensity_to_bank_deposit"] = (
+        audit["cash"].clip(lower=0.0) / period_money_base
+    )
 
     def diagnose_no_productivity_investment(row) -> str:
         if row["productivity_goods_spending"] > 1e-9:
             return "si_invirtio_en_producto_A_productividad"
+        if row["rd_investment_spending"] > 1e-9:
+            return "si_invirtio_en_ID_intangible_productividad"
         if row["technology_level_percent"] >= 92.0:
             return "cerca_del_techo_tecnologico_rendimiento_marginal_bajo"
         decision_reason = str(row["investment_decision_reason"])
@@ -1135,6 +1156,7 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "capital_investment",
         "technology_investment",
         "technology_gain",
+        "rd_investment_spending",
         "industrial_investment_spending",
         "investment_goods_units",
         "productivity_goods_spending",
@@ -1156,6 +1178,10 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "sales_realization_ratio",
         "probable_loss_cause",
         "recommended_loss_response",
+        "cash",
+        "period_total_spending_outflow",
+        "firm_period_marginal_propensity_to_spend",
+        "firm_period_propensity_to_bank_deposit",
         "payroll_total",
         "severance_total",
         "total_cost",
@@ -1235,11 +1261,13 @@ def family_audit_frame(simulation) -> pd.DataFrame:
         if affordability_gap:
             return "no_alcanzo_el_efectivo_disponible"
         shortfall_value = needed_value * max(0.0, 1.0 - coverage_ratio)
-        if family_voluntary_saved_cash > shortfall_value * 0.25:
+        if shortfall_value <= 1e-9:
+            return "friccion_o_preferencia_no_comprar"
+        if family_voluntary_saved_cash >= shortfall_value * 0.98:
             return "decidieron_ahorrar_o_no_comprar"
-        if family_involuntary_retained_cash > shortfall_value * 0.25:
+        if family_involuntary_retained_cash >= shortfall_value * 0.98:
             return "retencion_involuntaria_no_gastada"
-        return "friccion_o_preferencia_no_comprar"
+        return "presupuesto_asignado_insuficiente_a_basicos"
 
     rows: list[dict[str, float | int | str]] = []
     for family_id, members in groups.items():

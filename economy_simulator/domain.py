@@ -60,7 +60,7 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         name="Manufacturing / industrial goods",
         base_price=160.0,
         base_wage=18.0,
-        base_productivity=0.30,
+        base_productivity=0.60,
         household_demand_share=0.0,
         essential_need=0.0,
         discretionary_weight=0.0,
@@ -344,6 +344,7 @@ class Firm:
     last_investment_decision_reason: str = "sin_decision_registrada"
     last_technology_investment: float = 0.0
     last_technology_gain: float = 0.0
+    last_rd_investment_spending: float = 0.0
     last_interest_cost: float = 0.0
     labor_offer_rejections: int = 0
     labor_offer_rejection_wage_floor: float = 0.0
@@ -410,6 +411,7 @@ class FirmPeriodSnapshot:
     capital_investment: float
     technology_investment: float
     technology_gain: float
+    rd_investment_spending: float
     industrial_investment_spending: float
     investment_goods_units: float
     productivity_goods_spending: float
@@ -590,11 +592,22 @@ class SimulationConfig:
     essential_technology_multiplier: float = 1.18
     nonessential_technology_multiplier: float = 1.08
     nonessential_demand_multiplier: float = 0.30
+    post_basic_discretionary_coverage_cap: float = 1.15
     extra_essential_coverage_cap: float = 1.10
     technology_investment_share_min: float = 0.10
     technology_investment_share_max: float = 0.35
     technology_gain_min: float = 0.02
     technology_gain_max: float = 0.08
+    rd_investment_revenue_share_max: float = 0.04
+    rd_investment_excess_cash_share_max: float = 0.10
+    rd_investment_cap_share: float = 0.30
+    rd_min_return_signal: float = 0.30
+    rd_unfilled_capital_budget_fallback_share: float = 0.45
+    rd_university_service_share: float = 0.45
+    rd_skilled_labor_share: float = 0.45
+    rd_technology_gain_max: float = 0.11
+    rd_productivity_gain_max: float = 0.055
+    rd_capacity_gain_worker_share: float = 0.20
     technology_depreciation_rate: float = 0.004
     technology_cap: float = 4.0
     max_firm_employment_share: float = 0.40
