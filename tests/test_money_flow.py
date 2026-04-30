@@ -4842,7 +4842,7 @@ class MoneyFlowTests(unittest.TestCase):
             spec.base_price * 6.0,
         )
 
-        self.assertAlmostEqual(spec.base_productivity, 0.30, places=6)
+        self.assertAlmostEqual(spec.base_productivity, 0.60, places=6)
         self.assertLess(spec.base_price, 200.0)
         self.assertGreater(
             sim._manufacturing_capital_goods_quality(stronger_supplier),
@@ -4861,7 +4861,7 @@ class MoneyFlowTests(unittest.TestCase):
         self.assertLessEqual(quality, sim.config.firm_capital_goods_quality_ceiling)
         self.assertGreater(capital_service, 0.0)
 
-    def test_manufacturing_capacity_is_three_units_per_ten_workers_until_twenty_workers(self) -> None:
+    def test_manufacturing_capacity_uses_expanded_installation_headroom(self) -> None:
         sim = EconomySimulation(
             SimulationConfig(
                 periods=1,
@@ -4890,13 +4890,13 @@ class MoneyFlowTests(unittest.TestCase):
         sim._period_household_labor_capacity_cache.clear()
 
         firm.workers = [household.id for household in workers[:10]]
-        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 3.0, places=6)
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 6.0, places=6)
 
         firm.workers = [household.id for household in workers[:20]]
-        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 6.0, places=6)
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 12.0, places=6)
 
         firm.workers = [household.id for household in workers[:30]]
-        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 6.0, places=6)
+        self.assertAlmostEqual(sim._firm_installed_production_capacity_units(firm), 18.0, places=6)
 
     def test_competitive_demand_rejections_register_even_without_stockout(self) -> None:
         sim = EconomySimulation(

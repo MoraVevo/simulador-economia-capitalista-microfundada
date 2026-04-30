@@ -11,12 +11,12 @@ def main() -> int:
     batch_reports.country_profiles = lambda: {us_profile.name: us_profile}
 
     batch_reports.run_country_reports(
-        periods=120,
+        periods=50,
         households=10000,
         firms_per_sector=40,
         seed=7,
         periods_per_year=12,
-        output_dir=Path("output/run_eeuu_10000_h40_p120_f120_hh300"),
+        output_dir=Path("output/run_eeuu_10000_h40_p50_f120_hh300"),
         workers=1,
         audit_firms_sample=120,
         audit_families_sample=300,

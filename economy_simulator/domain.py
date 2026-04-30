@@ -64,7 +64,7 @@ SECTOR_SPECS: tuple[SectorSpec, ...] = (
         household_demand_share=0.0,
         essential_need=0.0,
         discretionary_weight=0.0,
-        target_inventory_ratio=0.0,
+        target_inventory_ratio=0.18,
         markup=0.35,
     ),
     SectorSpec(
@@ -169,7 +169,9 @@ class Household:
     wage_income: float = 0.0
     last_income: float = 0.0
     previous_income: float = 0.0
+    last_observed_wage: float = 0.0
     last_available_cash: float = 0.0
+    previous_consumption_value: float = 0.0
     alive: bool = True
     deprivation_streak: int = 0
     severe_hunger_streak: int = 0
@@ -309,6 +311,7 @@ class Firm:
     expected_sales_history: list[float] = field(default_factory=list)
     production_history: list[float] = field(default_factory=list)
     inventory_batches: list[float] = field(default_factory=list)
+    inventory_batch_unit_costs: list[float] = field(default_factory=list)
     last_worker_count: int = 0
     last_sales: float = 0.0
     last_revenue: float = 0.0
@@ -419,6 +422,13 @@ class FirmPeriodSnapshot:
     capacity_gain_workers: float
     unfilled_investment_budget: float
     investment_decision_reason: str
+    household_consumption_revenue: float
+    firm_capital_goods_revenue: float
+    firm_operating_procurement_revenue: float
+    government_procurement_revenue: float
+    government_infrastructure_revenue: float
+    same_sector_revenue: float
+    other_indirect_revenue: float
     stockout_rejected_units: float
     competitive_demand_rejected_units: float
     capacity_shortage_rejected_units: float
@@ -430,6 +440,14 @@ class FirmPeriodSnapshot:
     production: float
     profit: float
     payroll_total: float
+    payroll_tax_total: float
+    input_cost_total: float
+    transport_cost_total: float
+    fixed_overhead_total: float
+    capital_depreciation_cost: float
+    inventory_carry_cost: float
+    inventory_waste_cost: float
+    interest_cost: float
     severance_total: float
     total_cost: float
     loss_streak: int
@@ -540,6 +558,20 @@ class SimulationConfig:
     firm_expansion_credit_interest_sensitivity: float = 0.38
     firm_expansion_credit_max_revenue_share: float = 0.30
     firm_investment_gross_revenue_share: float = 0.20
+    firm_urgent_investment_pressure_threshold: float = 0.24
+    firm_urgent_investment_cash_share: float = 0.78
+    firm_urgent_investment_credit_revenue_share: float = 0.85
+    firm_urgent_investment_operating_reserve_periods: float = 0.25
+    firm_urgent_investment_min_capital_goods_units: float = 1.0
+    firm_urgent_investment_payback_periods: float = 6.0
+    firm_urgent_investment_min_unserved_sales_share: float = 0.10
+    firm_capacity_goods_strong_bias_threshold: float = 0.45
+    firm_capacity_goods_max_share: float = 0.88
+    firm_productivity_goods_min_share: float = 0.08
+    firm_profitable_revealed_demand_weight: float = 0.55
+    firm_maintenance_investment_revenue_share: float = 0.015
+    firm_profitable_expansion_wage_response_cap: float = 0.16
+    firm_profitable_demand_physical_investment_share: float = 0.42
     firm_capital_goods_price_multiplier: float = 1.0
     manufactured_capital_goods_capacity_share: float = 1.0
     manufactured_minimum_active_output_units: float = 1.0
@@ -744,6 +776,9 @@ class SimulationConfig:
     reservation_wage_unemployment_pressure_periods: int = 6
     reservation_wage_distress_sensitivity_min: float = 0.45
     reservation_wage_distress_sensitivity_max: float = 1.75
+    reservation_wage_last_wage_weight: float = 0.74
+    reservation_wage_consumption_habit_weight: float = 0.18
+    reservation_wage_basic_basket_weight: float = 0.08
     labor_offer_rejection_catchup_share: float = 0.50
     labor_offer_rejection_response_cap: float = 0.10
     firm_market_memory_years: float = 3.0

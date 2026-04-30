@@ -977,6 +977,14 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "worker_dismissals": pd.Series([0] * len(audit), index=audit.index),
         "exited_workers_reemployed": pd.Series([0] * len(audit), index=audit.index),
         "payroll_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "payroll_tax_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "input_cost_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "transport_cost_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "fixed_overhead_total": pd.Series([0.0] * len(audit), index=audit.index),
+        "capital_depreciation_cost": pd.Series([0.0] * len(audit), index=audit.index),
+        "inventory_carry_cost": pd.Series([0.0] * len(audit), index=audit.index),
+        "inventory_waste_cost": pd.Series([0.0] * len(audit), index=audit.index),
+        "interest_cost": pd.Series([0.0] * len(audit), index=audit.index),
         "severance_total": pd.Series([0.0] * len(audit), index=audit.index),
         "effective_marginal_unit_cost": audit.get(
             "unit_cost",
@@ -1011,6 +1019,13 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "unfilled_investment_budget": pd.Series([0.0] * len(audit), index=audit.index),
         "investment_decision_reason": pd.Series(["sin_decision_registrada"] * len(audit), index=audit.index),
         "investment_animal_spirits": pd.Series([1.0] * len(audit), index=audit.index),
+        "household_consumption_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "firm_capital_goods_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "firm_operating_procurement_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "government_procurement_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "government_infrastructure_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "same_sector_revenue": pd.Series([0.0] * len(audit), index=audit.index),
+        "other_indirect_revenue": pd.Series([0.0] * len(audit), index=audit.index),
     }
     for column, default_values in defaults.items():
         if column not in audit.columns:
@@ -1029,6 +1044,35 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
     audit["firm_income_total"] = audit["revenue"]
     audit["firm_profit_total"] = audit["profit"]
     audit["desired_workers_next_period"] = audit["desired_workers"]
+    revenue_sources = [
+        "household_consumption_revenue",
+        "firm_capital_goods_revenue",
+        "firm_operating_procurement_revenue",
+        "government_procurement_revenue",
+        "government_infrastructure_revenue",
+        "same_sector_revenue",
+        "other_indirect_revenue",
+    ]
+    audit["revenue_source_total"] = audit[revenue_sources].clip(lower=0.0).sum(axis=1)
+    audit["revenue_source_reconciliation_gap"] = (
+        audit["firm_income_total"]
+        - audit["revenue_source_total"]
+    )
+    audit["unclassified_revenue"] = audit["revenue_source_reconciliation_gap"].clip(lower=0.0)
+    audit["revenue_source_overtrace"] = (-audit["revenue_source_reconciliation_gap"]).clip(lower=0.0)
+    audit["cost_residual_unexplained"] = (
+        audit["total_cost"]
+        - audit["payroll_total"]
+        - audit["payroll_tax_total"]
+        - audit["input_cost_total"]
+        - audit["transport_cost_total"]
+        - audit["fixed_overhead_total"]
+        - audit["capital_depreciation_cost"]
+        - audit["inventory_carry_cost"]
+        - audit["inventory_waste_cost"]
+        - audit["interest_cost"]
+        - audit["severance_total"]
+    )
     audit["price_minus_marginal_unit_cost"] = audit["price"] - audit["effective_marginal_unit_cost"]
     audit["price_to_marginal_unit_cost_ratio"] = audit["price"] / audit["effective_marginal_unit_cost"].clip(lower=0.1)
     audit["sales_realization_ratio"] = audit["sales"] / audit["expected_sales"].clip(lower=1.0)
@@ -1182,8 +1226,28 @@ def firm_audit_frame(firm_history_frame: pd.DataFrame, history_frame: pd.DataFra
         "period_total_spending_outflow",
         "firm_period_marginal_propensity_to_spend",
         "firm_period_propensity_to_bank_deposit",
+        "household_consumption_revenue",
+        "firm_capital_goods_revenue",
+        "firm_operating_procurement_revenue",
+        "government_procurement_revenue",
+        "government_infrastructure_revenue",
+        "same_sector_revenue",
+        "other_indirect_revenue",
+        "revenue_source_total",
+        "unclassified_revenue",
+        "revenue_source_overtrace",
+        "revenue_source_reconciliation_gap",
         "payroll_total",
+        "payroll_tax_total",
+        "input_cost_total",
+        "transport_cost_total",
+        "fixed_overhead_total",
+        "capital_depreciation_cost",
+        "inventory_carry_cost",
+        "inventory_waste_cost",
+        "interest_cost",
         "severance_total",
+        "cost_residual_unexplained",
         "total_cost",
         "firm_income_total",
         "firm_profit_total",
